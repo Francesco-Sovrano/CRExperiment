@@ -5,6 +5,7 @@ from collections import Counter
 import datetime
 import sys
 # import psycopg2
+import random
 
 from flask import Flask, render_template, request, make_response, redirect, \
     url_for
@@ -23,61 +24,40 @@ task4_path = os.path.join("resources", "experiments","task4")
 # The list experiments contains all the files in the experiment directory
 #(_, _, experiments) = next(os.walk(experiments_path))
 
-# Counters of how many experiments have started
-experiment1_started = Counter()
-# experiment1_started['t1CorrMAGIX'] = 0
-# experiment1_started['t1CorrNonMAGIX'] = 0
-# experiment1_started['t1InCorrMAGIX'] = 0
-experiment1_started['t1InCorrNonMAGIX'] = 0
+file_suffixes = [
+    # 'corr_MAGIX.json',
+    # 'corr_NonMAGIX.json',
+    'incorr_MAGIX.json',
+    'incorr_NonMAGIX.json'
+]
 
-# Counters of how many experiments have concluded
-experiment1_concluded = Counter()
-# experiment1_concluded['t1CorrMAGIX'] = 0
-# experiment1_concluded['t1CorrNonMAGIX'] = 0
-# experiment1_concluded['t1InCorrMAGIX'] = 0
-experiment1_concluded['t1InCorrNonMAGIX'] = 0
-
-# Counters of how many experiments have started
-experiment2_started = Counter()
-# experiment2_started['t2CorrMAGIX'] = 0
-# experiment2_started['t2CorrNonMAGIX'] = 0
-# experiment2_started['t2InCorrMAGIX'] = 0
-experiment2_started['t2InCorrNonMAGIX'] = 0
-
-# Counters of how many experiments have concluded
-experiment2_concluded = Counter()
-# experiment2_concluded['t2CorrMAGIX'] = 0
-# experiment2_concluded['t2CorrNonMAGIX'] = 0
-# experiment2_concluded['t2InCorrMAGIX'] = 0
-experiment2_concluded['t2InCorrNonMAGIX'] = 0
+def get_task_label(file_suffix, task_id):
+    _map = {
+        'corr_MAGIX.json': f't{task_id}CorrMAGIX',
+        'corr_NonMAGIX.json': f't{task_id}CorrNonMAGIX',
+        'incorr_MAGIX.json': f't{task_id}InCorrMAGIX',
+        'incorr_NonMAGIX.json': f't{task_id}InCorrNonMAGIX',
+    }
+    return _map[file_suffix]
 
 # Counters of how many experiments have started
-experiment3_started = Counter()
-# experiment3_started['t3CorrMAGIX'] = 0
-# experiment3_started['t3CorrNonMAGIX'] = 0
-# experiment3_started['t3InCorrMAGIX'] = 0
-experiment3_started['t3InCorrNonMAGIX'] = 0
-
+experiment1_started = {get_task_label(s,1): 0 for s in file_suffixes}
 # Counters of how many experiments have concluded
-experiment3_concluded = Counter()
-# experiment3_concluded['t3CorrMAGIX'] = 0
-# experiment3_concluded['t3CorrNonMAGIX'] = 0
-# experiment3_concluded['t3InCorrMAGIX'] = 0
-experiment3_concluded['t3InCorrNonMAGIX'] = 0
+experiment1_concluded = {get_task_label(s,1): 0 for s in file_suffixes}
 
 # Counters of how many experiments have started
-experiment4_started = Counter()
-# experiment4_started['t4CorrMAGIX'] = 0
-# experiment4_started['t4CorrNonMAGIX'] = 0
-# experiment4_started['t4InCorrMAGIX'] = 0
-experiment4_started['t4InCorrNonMAGIX'] = 0
-
+experiment2_started = {get_task_label(s,2): 0 for s in file_suffixes}
 # Counters of how many experiments have concluded
-experiment4_concluded = Counter()
-# experiment4_concluded['t4CorrMAGIX'] = 0
-# experiment4_concluded['t4CorrNonMAGIX'] = 0
-# experiment4_concluded['t4InCorrMAGIX'] = 0
-experiment4_concluded['t4InCorrNonMAGIX'] = 0
+experiment2_concluded = {get_task_label(s,2): 0 for s in file_suffixes}
+
+# Counters of how many experiments have started
+experiment3_started = {get_task_label(s,3): 0 for s in file_suffixes}
+# Counters of how many experiments have concluded
+experiment3_concluded = {get_task_label(s,3): 0 for s in file_suffixes}
+
+# Counters of how many experiments have started
+experiment4_started = {get_task_label(s,4): 0 for s in file_suffixes}
+experiment4_concluded = {get_task_label(s,4): 0 for s in file_suffixes}
 
 # Creation of log file based on id name
 html_tags = ["<li", "<ul", "<a"]
@@ -88,196 +68,17 @@ p = Parser()
 #conn = psycopg2.connect(host='localhost', dbname='postgres', user='postgres', password="Zurich@1491", port=5432)
 #conn = psycopg2.connect(host='ec2-54-246-1-94.eu-west-1.compute.amazonaws.com', dbname='d20usq666h2m0p', user='qpursjrfhybeai', password="f9755cef7d73bb0be44eab3eb8fba472f2d6481431342821c00d3e853166cf7b", port=5432)
 
-
-def choose_experiment_task1():
+def choose_experiment_task(task_id):
     """
     Assign an experiment to a new user. We choose the type of experiment that
     has the least amount of concluded experiments.
     If we have more than one such case, we choose the one that has the least
     amount of started experiments.
     """
-    print(experiment1_concluded)
-    min_val = experiment1_concluded.most_common()[-1][1] #least common experiment1_concluded
-
-    mins = []
-    for k in experiment1_concluded:
-        if experiment1_concluded[k] == min_val:
-            mins.append(k)
-
-    if len(mins) > 1:
-        # more than 1 type has the same amount of concluded
-        # experiments. Hence, we choose the one that has the least amount of
-        # started ones
-        min_val = sys.maxsize
-        to_assing = ''
-        for k in mins:
-            if experiment1_started[k] < min_val:
-                min_val = experiment1_started[k]
-                to_assing = k
-    else:
-        to_assing = mins[0]
-
-    print("Assigned to " + to_assing)
-
-    if to_assing.startswith('t1CorrMAGIX'):
-        cr = 'task1_corr_MAGIX.json'
-    elif to_assing.startswith('t1CorrNonMAGIX'):
-        cr = 'task1_corr_NonMAGIX.json'
-    # elif to_assing.startswith('t1CorrNoXAI'):
-    #     cr = 'task1_corr_noXAI.json'
-    elif to_assing.startswith('t1InCorrMAGIX'):
-        cr = 'task1_incorr_MAGIX.json'
-    # elif to_assing.startswith('t1InCorrNoXAI'):
-    #     cr = 'task1_incorr_noXAI.json'
-    else:
-        cr = 'task1_incorr_NonMAGIX.json'
-
-    experiment1_started[to_assing] += 1
-    print("cr " + cr)
-    return cr
-
-def choose_experiment_task2():
-    """
-    Assign an experiment to a new user. We choose the type of experiment that
-    has the least amount of concluded experiments.
-    If we have more than one such case, we choose the one that has the least
-    amount of started experiments.
-    """
-    print(experiment2_concluded)
-    min_val = experiment2_concluded.most_common()[-1][1] #least common experiment1_concluded
-
-    mins = []
-    for k in experiment2_concluded:
-        if experiment2_concluded[k] == min_val:
-            mins.append(k)
-
-    if len(mins) > 1:
-        # more than 1 type has the same amount of concluded
-        # experiments. Hence, we choose the one that has the least amount of
-        # started ones
-        min_val = sys.maxsize
-        to_assing = ''
-        for k in mins:
-            if experiment2_started[k] < min_val:
-                min_val = experiment2_started[k]
-                to_assing = k
-    else:
-        to_assing = mins[0]
-
-    print("Assigned to " + to_assing)
-
-    if to_assing.startswith('t2CorrMAGIX'):
-        cr = 'task2_corr_MAGIX.json'
-    elif to_assing.startswith('t2CorrNonMAGIX'):
-        cr = 'task2_corr_NonMAGIX.json'
-    # elif to_assing.startswith('t2CorrNoXAI'):
-    #     cr = 'task2_corr_noXAI.json'
-    elif to_assing.startswith('t2InCorrMAGIX'):
-        cr = 'task2_incorr_MAGIX.json'
-    # elif to_assing.startswith('t2InCorrNoXAI'):
-    #     cr = 'task2_incorr_noXAI.json'
-    else:
-        cr = 'task2_incorr_NonMAGIX.json'
-
-    experiment2_started[to_assing] += 1
-    print("cr " + cr)
-    return cr
-
-
-def choose_experiment_task3():
-    """
-    Assign an experiment to a new user. We choose the type of experiment that
-    has the least amount of concluded experiments.
-    If we have more than one such case, we choose the one that has the least
-    amount of started experiments.
-    """
-    print(experiment3_concluded)
-    min_val = experiment1_concluded.most_common()[-1][1] #least common experiment1_concluded
-
-    mins = []
-    for k in experiment3_concluded:
-        if experiment3_concluded[k] == min_val:
-            mins.append(k)
-
-    if len(mins) > 1:
-        # more than 1 type has the same amount of concluded
-        # experiments. Hence, we choose the one that has the least amount of
-        # started ones
-        min_val = sys.maxsize
-        to_assing = ''
-        for k in mins:
-            if experiment3_started[k] < min_val:
-                min_val = experiment3_started[k]
-                to_assing = k
-    else:
-        to_assing = mins[0]
-
-    print("Assigned to " + to_assing)
-
-    if to_assing.startswith('t3CorrMAGIX'):
-        cr = 'task3_corr_MAGIX.json'
-    elif to_assing.startswith('t3CorrNonMAGIX'):
-        cr = 'task3_corr_NonMAGIX.json'
-    # elif to_assing.startswith('t3CorrNoXAI'):
-    #     cr = 'task3_corr_noXAI.json'
-    elif to_assing.startswith('t3InCorrMAGIX'):
-        cr = 'task3_incorr_MAGIX.json'
-    # elif to_assing.startswith('t3InCorrNoXAI'):
-    #     cr = 'task3_incorr_noXAI.json'
-    else:
-        cr = 'task3_incorr_NonMAGIX.json'
-
-    experiment3_started[to_assing] += 1
-    print("cr " + cr)
-    return cr
-
-
-def choose_experiment_task4():
-    """
-    Assign an experiment to a new user. We choose the type of experiment that
-    has the least amount of concluded experiments.
-    If we have more than one such case, we choose the one that has the least
-    amount of started experiments.
-    """
-    print(experiment4_concluded)
-    min_val = experiment4_concluded.most_common()[-1][1] #least common experiment4_concluded
-
-    mins = []
-    for k in experiment4_concluded:
-        if experiment4_concluded[k] == min_val:
-            mins.append(k)
-
-    if len(mins) > 1:
-        # more than 1 type has the same amount of concluded
-        # experiments. Hence, we choose the one that has the least amount of
-        # started ones
-        min_val = sys.maxsize
-        to_assing = ''
-        for k in mins:
-            if experiment4_started[k] < min_val:
-                min_val = experiment4_started[k]
-                to_assing = k
-    else:
-        to_assing = mins[0]
-
-    print("Assigned to " + to_assing)
-
-    if to_assing.startswith('t4CorrMAGIX'):
-        cr = 'task4_corr_MAGIX.json'
-    elif to_assing.startswith('t4CorrNonMAGIX'):
-        cr = 'task4_corr_NonMAGIX.json'
-    # elif to_assing.startswith('t4CorrNoXAI'):
-    #     cr = 'task4_corr_noXAI.json'
-    elif to_assing.startswith('t4InCorrMAGIX'):
-        cr = 'task4_incorr_MAGIX.json'
-    # elif to_assing.startswith('t4InCorrNoXAI'):
-    #     cr = 'task4_incorr_noXAI.json'
-    else:
-        cr = 'task4_incorr_NonMAGIX.json'
-
-    experiment4_started[to_assing] += 1
-    print("cr " + cr)
-    return cr
+    file_suffix = random.choice(file_suffixes)
+    file_name = f'task{task_id}_' + file_suffix
+    task_label = get_task_label(file_suffix, task_id)
+    return file_name, task_label
 
 
 @app.route('/')
@@ -374,7 +175,8 @@ def task1():
     log_data(str(user_id), "start", "scenario1")
 
     # Choosing experiment
-    cr_file = choose_experiment_task1()
+    cr_file,to_assign = choose_experiment_task(1)
+    experiment1_started[to_assign] += 1
     log_data(str(user_id), "task1", cr_file)
 
     exp_is_done = request.cookies.get('experiment-is_done', 'not_done')
@@ -418,7 +220,8 @@ def task2():
     log_data(str(user_id), "start", "scenario2")
 
     # Choosing experiment
-    cr_file = choose_experiment_task2()
+    cr_file,to_assign = choose_experiment_task(2)
+    experiment2_started[to_assign] += 1
     log_data(str(user_id), "task2", cr_file)
 
     exp_is_done = request.cookies.get('experiment-is_done', 'not_done')
@@ -461,7 +264,8 @@ def task3():
     log_data(str(user_id), "start", "scenario3")
 
     # Choosing experiment
-    cr_file = choose_experiment_task3()
+    cr_file,to_assign = choose_experiment_task(3)
+    experiment3_started[to_assign] += 1
     log_data(str(user_id), "task3", cr_file)
 
     exp_is_done = request.cookies.get('experiment-is_done', 'not_done')
@@ -504,7 +308,8 @@ def task4():
     log_data(str(user_id), "start", "scenario4")
 
     # Choosing experiment
-    cr_file = choose_experiment_task4()
+    cr_file,to_assign = choose_experiment_task(4)
+    experiment4_started[to_assign] += 1
     log_data(str(user_id), "task4", cr_file)
 
     exp_is_done = request.cookies.get('experiment-is_done', 'not_done')
