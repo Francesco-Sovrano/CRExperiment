@@ -1,0 +1,573 @@
+
+"""
+reliance_analysis.py  —  Seconds=120 by default, clearer legends, hatching for readability.
+
+- Filters by Seconds (default 120).
+- Filters to usefulness/helpfulness ratings in {3,4}.
+- Outputs four improved plots (counts, proportions, response-changes, per-scenario composition).
+- Uses hatching + labels so meaning does not depend on color.
+"""
+import argparse, os, zipfile, glob, tempfile, shutil
+import pandas as pd
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
+from matplotlib.patches import Patch
+from matplotlib.ticker import PercentFormatter, MaxNLocator
+from statsmodels.stats.proportion import proportions_ztest
+from scipy.stats import chi2_contingency, fisher_exact, mannwhitneyu
+import numpy as np
+
+# ---- Force vector text embedding ----
+mpl.rcParams['pdf.fonttype'] = 42
+mpl.rcParams['ps.fonttype']  = 42
+
+plt.rcParams.update({
+	"figure.dpi": 150,
+	"axes.titlesize": 15,
+	"axes.labelsize": 12,
+	"xtick.labelsize": 10,
+	"ytick.labelsize": 10,
+	"legend.fontsize": 10,
+	"axes.grid": True,
+	"grid.alpha": 0.3,
+})
+
+RELIANCE_ORDER = ["Appropriate accept", "Appropriate reject", "Over-reliance", "Under-reliance"]
+HATCHES = {
+	"Appropriate accept": "",
+	"Appropriate reject": "..",
+	"Over-reliance": "//..",
+	"Under-reliance": "//",
+}
+
+def ensure_dir(p):
+	os.makedirs(p, exist_ok=True)
+
+def annotate_bars(ax, fmt="{:.0f}", y_is_pct=False):
+	for c in ax.containers:
+		for b in c:
+			h = b.get_height()
+			if h <= 0:
+				continue
+			y = b.get_y() + h
+			ax.annotate(fmt.format(h*100 if y_is_pct else h),
+						(b.get_x()+b.get_width()/2, y), xytext=(0,3),
+						textcoords="offset points", ha="center", va="bottom", fontsize=9)
+
+def load_frames(path):
+	tmp_dir = None
+	try:
+		base = path
+		if path.lower().endswith(".zip"):
+			tmp_dir = tempfile.mkdtemp()
+			with zipfile.ZipFile(path, "r") as zf:
+				zf.extractall(tmp_dir)
+			base = tmp_dir
+		questionnaire_pattern = os.path.join(base, "**", "questionnaire.csv")
+		questionnaire_path = glob.glob(questionnaire_pattern, recursive=True)[0]  # Assumes at least one match
+		questionnaire_df = pd.read_csv(questionnaire_path)
+		
+		pattern = os.path.join(base, "**", "scenario_*.csv")
+		frames = [pd.merge(questionnaire_df, pd.read_csv(f), on="Prolific ID", how="outer") for f in glob.glob(pattern, recursive=True)]
+		if not frames:
+			raise FileNotFoundError("No scenario_*.csv files found.")
+		return pd.concat(frames, ignore_index=True)
+	finally:
+		if tmp_dir and os.path.isdir(tmp_dir):
+			shutil.rmtree(tmp_dir)
+
+def label_reliance(r):
+	if r["User error"]:
+		if r["Expected answer"] == "Reject":
+			return "Over-reliance"
+		elif r["Expected answer"] == "Accept":
+			return "Under-reliance"
+	else: # if not r["User error"]:
+		if r["Expected answer"] == "Reject":
+			return "Appropriate reject"
+		elif r["Expected answer"] == "Accept":
+			return "Appropriate accept"
+		# return "Appropriate"
+	return "Other"
+
+def tidy_task(val):
+	return str(val).split("_")[0].replace('task','scenario ').capitalize()
+
+def filter_invalid_rows(df):
+	# Keep only valid Prolific IDs
+	df = df[df["Prolific ID"].str.len() == 24]
+	# For any rows sharing both the same Prolific ID and the same Scenario, keep only the last occurrence.
+	df["Scenario"] = df["Task file"].apply(tidy_task)
+	df = df.drop_duplicates(subset=["Prolific ID", "Scenario"], keep="last")
+	# Keep only those IDs that appear in 4 scenarios
+	df = df[df.groupby("Prolific ID")["Scenario"].transform("nunique").eq(4)]
+	return df
+
+def analyse(df, min_seconds, keep_only_who_changed_mind, expected_answer=None):
+	df = df.copy()
+	# Keep only who spent enough time
+	df = df[df["Seconds"] >= min_seconds]
+	if expected_answer:
+		df = df[df["Expected answer"] == expected_answer]
+
+	# df = df[df["How much do you trust AI systems in general?"] >= 1]
+	# df = df[df["How would you rate your overall attitude toward Artificial Intelligence (AI)?"] >= 1]
+	df = df[
+		(
+			# Keep only who understood the explanations
+			(df["How easy was it to understand the explanation?"] >= 2) # not difficult (2 = neutral)
+			# # Keep only who understood the task
+			# & (
+			# 	(df["How confident are you in the decision you made? (with explanation)"] >= 1)
+			# 	| (df["How confident are you in the decision you made? (without explanation)"] >= 1)
+			# )
+			# Keep only who actually used the explanations, updating their mental model
+			& (df["Did the explanation help you evaluate the AI's output?"] >= 1)
+		)
+	]
+	if keep_only_who_changed_mind:
+		df = df[
+			(df["How useful was the explanation provided?"] >= 1)
+			& (
+				(df["How confident are you in the decision you made? (without explanation)"] != df["How confident are you in the decision you made? (with explanation)"])
+				| (df["Explanation changed mind"] == True)
+			)
+		]
+
+	# df = df[(df["How confident are you in the decision you made? (without explanation)"] < df["How confident are you in the decision you made? (with explanation)"])]
+	# df = df[df["How much effort did it take to understand and complete this task?"] <= 3]
+	# df = df[df["Explanation changed mind"]]
+	
+	# df = df[df["How easy was it to understand the explanation?"] > 3]
+	df["Reliance category"] = df.apply(label_reliance, axis=1)
+	counts = (df.groupby(["Explanation is MAGIX-defined","Reliance category"])
+				.size().unstack(fill_value=0)
+				.reindex(RELIANCE_ORDER, axis=1).sort_index(axis=0))
+	chi2, p, dof, _ = chi2_contingency(counts.values)
+	print(f"Overall χ²={chi2:.3f}, dof={dof}, p={p:.4f}  (Seconds ≥ {min_seconds})")
+	return df, counts
+
+def plot_counts(counts, out_dir, seconds, keep_only_who_changed_mind):
+	ax = counts.plot(kind="bar", figsize=(9,5))
+	ax.set_title("Reliance counts by explanation type")
+	ax.set_ylabel("Number of judgements")
+	ax.set_xlabel("Explanation is MAGIX-defined")
+	ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+	# Hatches by category
+	for container, cat in zip(ax.containers, counts.columns.tolist()):
+		for bar in container:
+			bar.set_hatch(HATCHES.get(cat, ""))
+	annotate_bars(ax, fmt="{:.0f}")
+	leg = ax.legend(title="Reliance category", ncols=3, frameon=True)
+	plt.tight_layout()
+	plt.savefig(os.path.join(out_dir, f"reliance_counts-s={seconds}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
+	plt.show()
+
+def plot_props(counts, out_dir, seconds, keep_only_who_changed_mind):
+	props = counts.div(counts.sum(axis=1), axis=0)
+	ax = props.plot(kind="bar", figsize=(9,5))
+	ax.set_title("Reliance proportions by explanation type")
+	ax.set_ylabel("Proportion")
+	ax.set_xlabel("Explanation is MAGIX-defined")
+	ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+	# Hatches by category
+	for container, cat in zip(ax.containers, props.columns.tolist()):
+		for bar in container:
+			bar.set_hatch(HATCHES.get(cat, ""))
+	annotate_bars(ax, fmt="{:.0f}%", y_is_pct=True)
+	ax.legend(title="Reliance category", ncols=3, frameon=True)
+	plt.tight_layout()
+	plt.savefig(os.path.join(out_dir, f"reliance_props-s={seconds}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
+	plt.show()
+
+def plot_changes(df, out_dir, seconds, keep_only_who_changed_mind):
+	df = df.copy()
+	df["Change type"] = df.apply(
+		lambda r: f"{r['Response before explanation']}→{r['Response after explanation']}" if r["Explanation changed mind"] else "No change",
+		axis=1,
+	)
+	# Sorted order if present
+	order = ["Accept→Reject", "No change", "Reject→Accept"]
+	ch = (df.groupby(["Explanation is MAGIX-defined","Change type"]).size().unstack(fill_value=0))
+	ch = ch.reindex(columns=[c for c in order if c in ch.columns], fill_value=0)
+	ax = ch.plot(kind="bar", figsize=(9,5))
+	ax.set_title("Response‑change patterns by explanation type")
+	ax.set_ylabel("Number of judgements")
+	ax.set_xlabel("Explanation is MAGIX-defined")
+	ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+	# Hatches per change-type to avoid relying on color
+	for container, col in zip(ax.containers, ch.columns.tolist()):
+		hatch = {"Accept→Reject":"//","No change":"","Reject→Accept":"xx"}.get(col, "")
+		for bar in container:
+			bar.set_hatch(hatch)
+	annotate_bars(ax, fmt="{:.0f}")
+	ax.legend(title="Change type", ncols=3, frameon=True)
+	plt.tight_layout()
+	plt.savefig(os.path.join(out_dir, f"response_changes-s={seconds}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
+	plt.show()
+
+def plot_per_scenario_multi(df, out_dir, min_seconds, keep_only_who_changed_mind):
+	"""
+	Create a 1x3 subplot figure showing per-scenario reliance composition for:
+	- All experiments (expected_answer=None)
+	- Only Accept-correct (expected_answer='Accept')
+	- Only Reject-incorrect (expected_answer='Reject')
+	"""
+	# Define the three analyses
+	scenarios = None
+	results = []
+	for label, expected in [("All", None), ("Accept", "Accept"), ("Reject", "Reject")]:
+		df_sub, counts = analyse(df, min_seconds, keep_only_who_changed_mind, expected_answer=expected)
+		# prepare proportions per scenario
+		base = (df_sub.groupby(["Scenario", "Explanation is MAGIX-defined", "Reliance category"])  
+					.size().rename("n").reset_index())
+		totals = base.groupby(["Scenario", "Explanation is MAGIX-defined"])["n"].transform("sum")
+		base['prop'] = base['n'] / totals
+		if scenarios is None:
+			scenarios = sorted(base['Scenario'].unique())
+		results.append((label, base))
+
+	plt.rcParams.update({
+		# … other params …
+		"axes.grid": False,          # turn off all grids
+		# "grid.alpha": 0.3,         # no longer needed
+	})
+
+	x = np.arange(len(scenarios))
+	width = 0.3
+	fig, axes = plt.subplots(1, 3, figsize=(10, 4), sharey=True)
+
+	expl_colors = {False: 'C0', True: 'C1'}
+	score_map = {"Under-reliance": 0, "Appropriate accept": 1, "Appropriate reject": 1, "Over-reliance": 0}
+
+	for ax, (label, base) in zip(axes, results):
+		for idx, expl in enumerate([False, True]):
+			subset = base[base['Explanation is MAGIX-defined'] == expl]
+			pivot = subset.pivot(index='Scenario', columns='Reliance category', values='prop') \
+							 .reindex(scenarios, fill_value=0)
+			bottom = np.zeros(len(scenarios))
+			for cat in RELIANCE_ORDER:
+				vals = pivot.get(cat, np.zeros(len(scenarios)))
+				bars = ax.bar(
+					x + (idx - 0.5)*width,
+					vals,
+					width,
+					bottom=bottom,
+					color=expl_colors[expl] if 'Appropriate' in cat else (*mcolors.to_rgb(expl_colors[expl]), 0.1),
+					edgecolor='black',
+					hatch=HATCHES.get(cat, '')
+				)
+				# annotate counts and percentages
+				# compute raw counts
+				count_pivot = subset.pivot(index='Scenario', columns='Reliance category', values='n')\
+									 .reindex(scenarios, fill_value=0)
+				for i, v in enumerate(vals):
+					if v > 0.02:
+						c = int(count_pivot.loc[scenarios[i], cat])
+						ax.annotate(
+							f"{c}({int(round(v*100)):.0f}%)",
+							(x[i] + (idx - 0.5)*width, bottom[i] + v/2),
+							xytext=(0, 3), textcoords='offset points', ha='center', va='bottom', fontsize=7,
+							bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='none', alpha=0.9)
+						)
+				bottom += vals
+		# p-value annotation via Mann–Whitney U
+		df_label = df[df['Seconds'] >= min_seconds].copy()
+		if label != 'All':
+			df_label = df_label[df_label['Expected answer'] == label]
+		# compute p-values per scenario
+		p_vals = {}
+		for scen in scenarios:
+			sub = df_label[df_label['Scenario'] == scen]
+			scores_non = sub[sub['Explanation is MAGIX-defined'] == False]['Reliance category'].map(score_map)
+			scores_mag = sub[sub['Explanation is MAGIX-defined'] == True]['Reliance category'].map(score_map)
+			if len(scores_non)>0 and len(scores_mag)>0:
+				# Run Mann-Whitney U test
+				_, p = mannwhitneyu(scores_non, scores_mag, alternative='greater' if np.mean(scores_non) > np.mean(scores_mag) else 'less')
+				# # Run Chi-squared test
+				# non_counts = scores_non.value_counts().reindex([0, 1], fill_value=0)
+				# mag_counts = scores_mag.value_counts().reindex([0, 1], fill_value=0)
+				# contingency = [
+				# 	[non_counts.loc[0], non_counts.loc[1]],
+				# 	[mag_counts.loc[0], mag_counts.loc[1]]
+				# ]
+				# chi2, p, dof, expected = chi2_contingency(contingency)
+			else:
+				p = np.nan
+			p_vals[scen] = p
+		for i, scen in enumerate(scenarios):
+			ax.text(x[i], 1.05, f"p={p_vals[scen]:.3f}", weight ='bold' if p_vals[scen] < 0.05 else 'normal', ha='center', va='bottom', fontsize=9)
+
+		ax.set_xticks(x)
+		ax.set_xticklabels(list(map(lambda x: x.replace('Scenario','Scen.'), scenarios)), rotation=0, ha='center', fontsize=9)
+		ax.set_title(f"Expected: {label}", fontsize=9)
+		if ax is axes[0]:
+			ax.set_ylabel('Proportion within explanation type', fontsize=9)
+			ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+		ax.set_ylim(0, 1.1)
+		ax.yaxis.set_major_locator(MaxNLocator(5))
+		ax.tick_params(axis='y', labelsize=9)
+
+	# Figure-level legend for Explanation type on top-left
+	type_handles = [
+		Patch(facecolor=expl_colors[False], edgecolor='black', label='Non-MAGIX'),
+		Patch(facecolor=expl_colors[True], edgecolor='black', label='MAGIX')
+	]
+	fig.legend(
+		handles=type_handles,
+		title='Explanation type',
+		loc='upper left',
+		bbox_to_anchor=(0.1, 1),
+		ncol=len(type_handles),
+		frameon=True,
+		fontsize=8,           # label font size
+		title_fontsize=8     # title font size
+	)
+
+	# Figure-level legend for Reliance categories at top center
+	cat_handles = [
+		Patch(facecolor='white', edgecolor='black', hatch=HATCHES[c], label=c) for c in RELIANCE_ORDER
+	]
+	fig.legend(
+		handles=cat_handles,
+		title='Reliance category',
+		loc='upper center',
+		bbox_to_anchor=(0.6, 1),
+		ncol=len(RELIANCE_ORDER),
+		frameon=True,
+		fontsize=8,           # label font size
+		title_fontsize=10     # title font size
+	)
+
+	plt.tight_layout(rect=[0, 0, 1, 0.9])
+	plt.savefig(os.path.join(out_dir, f"per_scenario_reliance_props_multi-s={min_seconds}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
+	plt.show()
+
+def plot_corrections(df, output_dir, seconds):
+	df = df.copy()
+	# Time filter only; keep full range of 'ease' values
+	df = df[df["Seconds"] >= seconds]
+	# Ensure reliance labels exist
+	if "Reliance category" not in df.columns:
+		df["Reliance category"] = df.apply(label_reliance, axis=1)
+
+	# 1) filter to only “corrections” in the two appropriate categories
+	corr = df[
+		(df["Explanation changed mind"] == True) &
+		(df["Reliance category"].isin(["Appropriate reject", "Appropriate accept"]))
+	].copy()
+	# 2) label the direction of the correction
+	corr["Correction type"] = corr["Reliance category"].map({
+		"Appropriate reject": "Accept → Reject (on AI Incorrect)",
+		"Appropriate accept": "Reject → Accept (on AI Correct)"
+	})
+	# 3) count by scenario, MAGIX-flag, and correction type
+	counts = (
+		corr
+		.groupby(["Scenario", "Explanation is MAGIX-defined", "Correction type"])
+		.size()
+		.reset_index(name="Count")
+	)
+	# 4) pivot so we can plot side by side
+	pivot = counts.pivot_table(
+		index="Scenario",
+		columns=["Correction type", "Explanation is MAGIX-defined"],
+		values="Count",
+		fill_value=0
+	)
+	# 5) plot
+	fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+	for ax, ctype in zip(axes, ["Accept → Reject (on AI Incorrect)", "Reject → Accept (on AI Correct)"]):
+		# get two bars per scenario: MAGIX True vs False
+		data = pivot[ctype]
+		data.plot(
+			kind="bar",
+			ax=ax,
+			width=0.8,
+			legend=True,
+			title=ctype,
+			ylabel="Number of corrections" if ax is axes[0] else ""
+		)
+		ax.set_xlabel("")
+		ax.tick_params(axis='x', labelrotation=0)
+		ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+		ax.ticklabel_format(axis='y', style='plain')  # avoid scientific notation
+		# annotate bars
+		for container in ax.containers:
+			for bar in container:
+				h = bar.get_height()
+				if h > 0:
+					ax.annotate(f"{h:.0f}", 
+								(bar.get_x() + bar.get_width() / 2, h),
+								textcoords="offset points", xytext=(0,3),
+								ha="center", va="bottom", fontsize=9)
+	fig.tight_layout()
+	# save to output directory
+	plt.savefig(os.path.join(output_dir, f"corrections_by_scenario-s={seconds}.pdf"))
+	plt.show()
+
+def plot_mitigation_by_ease(df, out_dir, seconds, keep_only_who_changed_mind):
+	"""
+	Plot how 'How easy was it to understand the explanation?' relates to
+	over- and under-reliance mitigation, split by MAGIX vs non-MAGIX,
+	with statistical tests showing p-values for each ease level.
+
+	Definitions:
+	- Over-reliance mitigation rate (Expected=Reject):
+	  Appropriate reject / (Appropriate reject + Over-reliance)
+	- Under-reliance mitigation rate (Expected=Accept):
+	  Appropriate accept / (Appropriate accept + Under-reliance)
+	"""
+	d = df.copy()
+	# Time filter only; keep full range of 'ease' values
+	d = d[d["Seconds"] >= seconds]
+	ease_col = "How easy was it to understand the explanation?"
+	d = d[pd.notna(d[ease_col])]
+	d["Ease"] = d[ease_col].astype(int) + 1
+
+	# Ensure reliance labels exist
+	if "Reliance category" not in d.columns:
+		d["Reliance category"] = d.apply(label_reliance, axis=1)
+
+	# Filter for valid explanation feedback
+	d = d[
+		(d["Did the explanation help you evaluate the AI's output?"] >= 1)
+	]
+
+	if keep_only_who_changed_mind:
+		d = d[
+			(d["How useful was the explanation provided?"] >= 1)
+			& (
+				(df["How confident are you in the decision you made? (without explanation)"] != df["How confident are you in the decision you made? (with explanation)"])
+				| (df["Explanation changed mind"] == True)
+			)
+		]
+
+	def mitigation_series(data, expected, appropriate_label, error_label):
+		sub = data[data["Expected answer"] == expected]
+		tab = (sub.groupby(["Explanation is MAGIX-defined", "Ease", "Reliance category"])   
+				   .size()
+				   .unstack(fill_value=0))
+		for col in (appropriate_label, error_label):
+			if col not in tab.columns:
+				tab[col] = 0
+		den = tab[appropriate_label] + tab[error_label]
+		rate = (tab[appropriate_label] / den).replace([np.inf, np.nan], np.nan)
+		return rate, tab  # also return counts
+
+	# Build rates and counts
+	over_rate, over_counts = mitigation_series(
+		d, expected="Reject",
+		appropriate_label="Appropriate reject",
+		error_label="Over-reliance"
+	)
+	under_rate, under_counts = mitigation_series(
+		d, expected="Accept",
+		appropriate_label="Appropriate accept",
+		error_label="Under-reliance"
+	)
+
+	eases = sorted(d["Ease"].unique())
+	fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+	titles = ["Over-reliance mitigation (Expected = Reject)",
+			  "Under-reliance mitigation (Expected = Accept)"]
+	rates_counts = [(over_rate, over_counts, "Appropriate reject", "Over-reliance"),
+					(under_rate, under_counts, "Appropriate accept", "Under-reliance")]
+
+	for ax, title, (rate, counts, appr_label, err_label) in zip(axes, titles, rates_counts):
+		# Compute p-values for each ease level
+		p_values = {}
+		for e in eases:
+			try:
+				cnt0 = counts.loc[(False, e)][appr_label]
+				tot0 = counts.loc[(False, e)][appr_label] + counts.loc[(False, e)][err_label]
+			except KeyError:
+				cnt0, tot0 = 0, 0
+			try:
+				cnt1 = counts.loc[(True, e)][appr_label]
+				tot1 = counts.loc[(True, e)][appr_label] + counts.loc[(True, e)][err_label]
+			except KeyError:
+				cnt1, tot1 = 0, 0
+			if tot0 > 0 and tot1 > 0:
+				_, pval = proportions_ztest([cnt0, cnt1], [tot0, tot1])
+			else:
+				pval = np.nan
+			p_values[e] = pval
+
+		# Plot lines and annotate counts and p-values
+		y_values = {}
+		for magix_flag, label, marker in [(False, "Non-MAGIX", "o"), (True, "MAGIX", "s")]:
+			series = rate.loc[magix_flag] if (magix_flag in rate.index.get_level_values(0)) else pd.Series(dtype=float)
+			y = [series.get(e, np.nan) for e in eases]
+			y_values[magix_flag] = y
+			ax.plot(eases, y, marker=marker, label=label)
+			# N annotations (slightly lower offset)
+			for idx, e in enumerate(eases):
+				N = 0
+				if (magix_flag, e) in counts.index:
+					N = int(counts.loc[(magix_flag, e)][appr_label] + counts.loc[(magix_flag, e)][err_label])
+				yv = y[idx]
+				if np.isfinite(yv):
+					ax.annotate(f"N={N}", (e, yv), xytext=(0, 4), textcoords="offset points",
+								ha="center", va="bottom", fontsize=7, bbox=dict(
+						boxstyle="round,pad=0.2",
+						facecolor="white",
+						edgecolor="none",
+						alpha=0.9
+					))
+
+		# P-value annotations higher and bold when <0.05
+		for e in eases:
+			pval = p_values.get(e, np.nan)
+			if np.isfinite(pval):
+				y0 = y_values.get(False)[eases.index(e)]
+				y1 = y_values.get(True)[eases.index(e)]
+				y_max = max([yv for yv in (y0, y1) if np.isfinite(yv)] + [0])
+				weight = 'bold' if pval < 0.05 else 'normal'
+				ax.annotate(f"p={pval:.3f}", (e, y_max), xytext=(0, 12), textcoords="offset points",
+							ha="center", va="bottom", fontsize=8, fontweight=weight, bbox=dict(
+						boxstyle="round,pad=0.2",
+						facecolor="white",
+						edgecolor="none",
+						alpha=0.9
+					))
+
+		ax.set_title(title, fontsize=12)
+		ax.set_xlabel("Ease of understanding (1–5)")
+		ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+		ax.set_ylim(0, 1.1)
+		ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+	axes[0].set_ylabel("Mitigation rate")
+	axes[0].legend(title="Explanation type", frameon=True)
+	plt.tight_layout()
+	os.makedirs(out_dir, exist_ok=True)
+	plt.savefig(os.path.join(out_dir, f"mitigation_by_ease-s={seconds}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
+	plt.show()
+
+
+def main():
+	parser = argparse.ArgumentParser(description="Analyse reliance patterns in scenario CSVs.")
+	parser.add_argument("--input", required=True, help="Directory containing scenario_*.csv files, or a .zip of them.")
+	parser.add_argument("--output", required=True, help="Directory to write results.")
+	parser.add_argument("--min-seconds", type=int, default=10, help="Minimum 'Seconds' to include (default: 120).")
+	parser.add_argument("--keep_only_who_changed_mind", action="store_true")
+	args = parser.parse_args()
+
+	ensure_dir(args.output)
+
+	raw_df = load_frames(args.input)
+	raw_df = filter_invalid_rows(raw_df)
+
+	plot_corrections(raw_df, args.output, args.min_seconds)
+	plot_mitigation_by_ease(raw_df, args.output, args.min_seconds, args.keep_only_who_changed_mind)
+
+	df, counts = analyse(raw_df, args.min_seconds, args.keep_only_who_changed_mind)
+	plot_per_scenario_multi(df, args.output, args.min_seconds, args.keep_only_who_changed_mind)
+	plot_changes(df, args.output, args.min_seconds, args.keep_only_who_changed_mind)
+	plot_counts(counts, args.output, args.min_seconds, args.keep_only_who_changed_mind)
+	plot_props(counts, args.output, args.min_seconds, args.keep_only_who_changed_mind)
+
+if __name__ == "__main__":
+	main()
