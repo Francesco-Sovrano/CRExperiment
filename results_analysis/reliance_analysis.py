@@ -112,8 +112,9 @@ def analyse(df, min_seconds, keep_only_who_changed_mind, expected_answer=None):
 	if expected_answer:
 		df = df[df["Expected answer"] == expected_answer]
 
-	# df = df[df["How much do you trust AI systems in general?"] >= 1]
-	# df = df[df["How would you rate your overall attitude toward Artificial Intelligence (AI)?"] >= 1]
+	# df = df[df["How much do you trust AI systems in general?"] <= 3]
+	# df = df[df["How would you rate your overall attitude toward Artificial Intelligence (AI)?"] <= 3]
+	# df = df[df['How much effort did it take to understand and complete this task?'] <= 3]
 	df = df[
 		(
 			# Keep only who understood the explanations
@@ -547,100 +548,123 @@ def plot_mitigation_by_ease(df, out_dir, seconds, keep_only_who_changed_mind):
 	plt.savefig(os.path.join(out_dir, f"mitigation_by_ease-s={seconds}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
 	plt.show()
 
-def plot_effort_reliance(df, out_dir, seconds):
+def plot_reliance_vs_trust_attitude_effort(df, out_dir, seconds=0):
 	"""
-	Show whether and how much 'How much effort...' correlates with
-	over-/under-reliance, split by MAGIX vs non-MAGIX.
+	Generate side-by-side plots showing over- and under-reliance rates against user-reported Effort, Attitude, and Trust,
+	using consistent colors for MAGIX vs non-MAGIX groups.
 
-	- Lines: rate of Over-reliance / Under-reliance at each effort level.
-	- Text: Spearman rho (individual-level) with p-values for each group.
+	Parameters:
+	- df: pd.DataFrame containing the survey data
+	- out_dir: directory to save the output figures
+	- seconds: minimum threshold for df['Seconds'] filtering
 	"""
-
-	# Keep only rows with a valid numeric effort
-	effort_col = "How much effort did it take to understand and complete this task?"
+	# Define question columns and labels
+	questions = {
+		'Effort': 'How much effort did it take to understand and complete this task?',
+		'Attitude': 'How would you rate your overall attitude toward Artificial Intelligence (AI)?',
+		'Trust': 'How much do you trust AI systems in general?'
+	}
+	# Prepare data
 	d = df.copy()
-	d = d[d["Seconds"] >= seconds]
-	if "Reliance category" not in d.columns:
-		d["Reliance category"] = d.apply(label_reliance, axis=1)
-	d["Effort"] = pd.to_numeric(d[effort_col], errors="coerce")+1
-	d = d.dropna(subset=["Effort"])
+	d = d[d.get('Seconds', 0) >= seconds]
+	if 'Reliance category' not in d.columns:
+		d['Reliance category'] = d.apply(label_reliance, axis=1)
+	d['is_over'] = ((d['Response before explanation']=='Accept') & (d['Expected answer']=='Reject')).astype(int)
+	d['is_under'] = ((d['Response before explanation']=='Reject') & (d['Expected answer']=='Accept')).astype(int)
 
-	# Binary flags for reliance types
-	d["is_over"] = ((d["Response before explanation"] == "Accept") & (d["Expected answer"] == "Reject")).astype(int)
-	d["is_under"] = ((d["Response before explanation"] == "Reject") & (d["Expected answer"] == "Accept")).astype(int)
+	# Convert each question to numeric scale starting at 1
+	for key, col in questions.items():
+		d[key] = pd.to_numeric(d[col], errors='coerce')
+		d = d.dropna(subset=[key, "Scenario"])
+		d[key] = (d[key] + 1).astype(int)
 
-	# Aggregate: rate per effort level within MAGIX vs non-MAGIX
-	grp = d.groupby(["Explanation is MAGIX-defined", "Effort"])
-	rates = grp.agg(over_rate=("is_over", "mean"),
-					under_rate=("is_under", "mean"),
-					n=("is_over", "size")).reset_index()
+	# Setup subplots
+	n_q = len(questions)
+	fig, axes = plt.subplots(1, n_q, figsize=(5.5*n_q, 4), sharey=True)
 
-	# Spearman correlations (individual level, per MAGIX group)
+	for key, _ in questions.items():
+		print(f"\n=== {key} ===")
+		print(" overall non-null count:", d[key].notna().sum())
+		print(" unique values     :", d[key].dropna().unique())
+		for flag, label in [(False,'Non-MAGIX'), (True,'MAGIX')]:
+			sub = d[d['Explanation is MAGIX-defined']==flag]
+			print(f"  {label}: count={sub[key].notna().sum()}, unique={sub[key].nunique()}")
+	# assert False
+
+	# Compute stats and plot
 	stats = {}
-	for magix_flag, sub in d.groupby("Explanation is MAGIX-defined"):
-		# Only compute if at least two distinct effort values are present
-		if sub["Effort"].nunique() >= 2:
-			rho_over, p_over = spearmanr(sub["Effort"], sub["is_over"])
-			rho_under, p_under = spearmanr(sub["Effort"], sub["is_under"])
-		else:
-			rho_over = rho_under = np.nan
-			p_over = p_under = np.nan
-		stats[magix_flag] = {"rho_over": rho_over, "p_over": p_over,
-							 "rho_under": rho_under, "p_under": p_under,
-							 "n": len(sub)}
-
-	# Plot
-	expl_colors = {False: "C0", True: "C1"}
-	fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
-	for ax, rate_col, title in [
-		(axes[0], "over_rate", "Over-reliance rate vs Effort"),
-		(axes[1], "under_rate", "Under-reliance rate vs Effort"),
-	]:
+	for idx, (key, _) in enumerate(questions.items()):
+		ax = axes[idx]
+		# Aggregate rates by question value and MAGIX flag
+		grp = d.groupby(['Explanation is MAGIX-defined', key])
+		rates = grp.agg(
+			over_rate=('is_over', 'mean'),
+			under_rate=('is_under', 'mean'),
+			n=('is_over', 'size')
+		).reset_index()
+		# Plot data lines with consistent colors
 		for magix_flag in [False, True]:
-			sub = rates[rates["Explanation is MAGIX-defined"] == magix_flag].sort_values("Effort")
-			if sub.empty:
+			subset = rates[rates['Explanation is MAGIX-defined']==magix_flag].sort_values(key)
+			if subset.empty:
 				continue
-			ax.plot(sub["Effort"], sub[rate_col], marker="o",
-					label=("MAGIX" if magix_flag else "Non-MAGIX"),
-					linewidth=1.5)
-			# Show counts at each point (optional but handy)
-			for _, r in sub.iterrows():
-				ax.annotate(f"n={int(r['n'])}",
-							(r["Effort"], r[rate_col]),
-							xytext=(0, 6), textcoords="offset points",
-							ha="center", va="bottom", fontsize=8)
-
-		ax.set_title(title)
-		ax.set_xlabel("Effort (1-5)")
-		if ax is axes[0]:
-			ax.set_ylabel("Proportion")
+			# assign a single color per group
+			color = 'C0' if not magix_flag else 'C1'
+			label_prefix = 'Non-MAGIX' if not magix_flag else 'MAGIX'
+			# solid line for over, dashed for under
+			ax.plot(subset[key], subset['over_rate'], linestyle='-', marker='o',
+					color=color, label=f'Over {label_prefix}', linewidth=1.2)
+			ax.plot(subset[key], subset['under_rate'], linestyle='--', marker='x',
+					color=color, label=f'Under {label_prefix}', linewidth=1.2)
+			# Annotate sample sizes at over points
+			for _, row in subset.iterrows():
+				ax.annotate(f"n={int(row['n'])}", (row[key], row['over_rate']),
+							xytext=(0, 6), textcoords='offset points', ha='center', va='top', fontsize=6)
+		# Axis formatting
+		ax.set_title(f"Reliance vs {key}")
+		ax.set_xlabel(key)
+		if idx == 0:
+			ax.set_ylabel('Proportion')
 			ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-		ax.set_xticks(sorted(rates["Effort"].unique()))
-		ax.grid(True, alpha=0.3)
+		ax.grid(alpha=0.3)
+		# Compute Spearman correlations
+		stats[key] = {}
+		for flag, label in [(False, 'Non-MAGIX'), (True, 'MAGIX')]:
+			sub = d[d['Explanation is MAGIX-defined']==flag]
+			if sub[key].nunique() >= 2:
+				rho_o, p_o = spearmanr(sub[key], sub['is_over'])
+				rho_u, p_u = spearmanr(sub[key], sub['is_under'])
+			else:
+				rho_o = p_o = rho_u = p_u = np.nan
+			stats[key][label] = {'rho_over': rho_o, 'p_over': p_o,
+								  'rho_under': rho_u, 'p_under': p_u,
+								  'n': len(sub)}
+		# Build stats text for this panel
+		panel_text = []
+		for label in ['Non-MAGIX', 'MAGIX']:
+			s = stats[key][label]
+			panel_text.append(
+				f"{label}: ρ_over={s['rho_over']:.2f} (p={s['p_over']:.3f}),"
+				f" ρ_under={s['rho_under']:.2f} (p={s['p_under']:.3f})"
+			)
+		# Place text inside subplot
+		ax.text(0, 1.2, '\n'.join(panel_text), transform=ax.transAxes,
+				ha='left', va='top', fontsize=7,
+				bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor='none'))
 
-	# Compose a compact stats box
-	txt_lines = []
-	for flag in [False, True]:
-		lab = "Non-MAGIX" if not flag else "MAGIX"
-		st = stats.get(flag, {})
-		txt_lines.append(
-			f"{lab}: ρ_over={st.get('rho_over', np.nan):.2f} (p={st.get('p_over', np.nan):.3f}), "
-			f"ρ_under={st.get('rho_under', np.nan):.2f} (p={st.get('p_under', np.nan):.3f}), "
-			f"n={st.get('n', 0)}"
-		)
-	fig.text(0.02, 0.98, "\n".join(txt_lines), ha="left", va="top", fontsize=9,
-			 bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.9, edgecolor="none"))
+	# Combined legend at bottom
+	handles, labels = axes[-1].get_legend_handles_labels()
+	fig.legend(handles, labels, loc='upper center', ncol=4, frameon=True, bbox_to_anchor=(0.5, 0.96))
 
-	# Shared legend
-	axes[1].legend(title="Explanation type", frameon=True, loc="lower right")
-
-	fig.suptitle("Effort vs Over/Under-reliance by explanation type", y=1.04, fontsize=12)
+	# Overall title & layout
+	fig.suptitle('Reliance rates vs Effort, Attitude, and Trust (Before Explanations)', y=1)
 	fig.tight_layout()
-	out_path = os.path.join(out_dir, f"effort_reliance_correlation_all-s={seconds}.pdf")
-	plt.savefig(out_path, bbox_inches="tight")
+
+	# Save output
+	os.makedirs(out_dir, exist_ok=True)
+	out_path = os.path.join(out_dir, f"reliance_vs_trust_attitude_effort_s={seconds}.pdf")
+	plt.savefig(out_path, bbox_inches='tight')
 	plt.show()
-	print("\n".join(txt_lines))
-	print(f"Saved to: {out_path}")
+	print(f"Saved figure to: {out_path}")
 
 def plot_effort_reliance_by_scenario(df, out_dir, seconds):
 	effort_col = "How much effort did it take to understand and complete this task?"
@@ -650,8 +674,9 @@ def plot_effort_reliance_by_scenario(df, out_dir, seconds):
 	d = df[df["Seconds"] >= seconds].copy()
 	if "Reliance category" not in d.columns:
 		d["Reliance category"] = d.apply(label_reliance, axis=1)
-	d["Effort"] = pd.to_numeric(d[effort_col], errors="coerce") + 1
+	d["Effort"] = pd.to_numeric(d[effort_col], errors="coerce")
 	d = d.dropna(subset=["Effort", scenario_col])
+	d["Effort"] = (d["Effort"] + 1).astype(int)
 	d["is_over"] = ((d["Response before explanation"] == "Accept") & (d["Expected answer"] == "Reject")).astype(int)
 	d["is_under"] = ((d["Response before explanation"] == "Reject") & (d["Expected answer"] == "Accept")).astype(int)
 
@@ -851,7 +876,7 @@ def main():
 	raw_df = filter_invalid_rows(raw_df)
 
 	plot_effort_distribution(raw_df, args.output, args.min_seconds)
-	plot_effort_reliance(raw_df, args.output, args.min_seconds)
+	plot_reliance_vs_trust_attitude_effort(raw_df, args.output, args.min_seconds)
 	plot_effort_reliance_by_scenario(raw_df, args.output, args.min_seconds)
 	plot_corrections(raw_df, args.output, args.min_seconds)
 	plot_mitigation_by_ease(raw_df, args.output, args.min_seconds, args.keep_only_who_changed_mind)
