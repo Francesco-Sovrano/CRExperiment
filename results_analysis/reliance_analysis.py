@@ -15,8 +15,9 @@ from matplotlib import colors as mcolors
 from matplotlib.patches import Patch
 from matplotlib.ticker import PercentFormatter, MaxNLocator
 from statsmodels.stats.proportion import proportions_ztest
-from scipy.stats import chi2_contingency, fisher_exact, mannwhitneyu
+from scipy.stats import chi2_contingency, fisher_exact, mannwhitneyu, spearmanr
 import numpy as np
+from matplotlib.lines import Line2D
 
 # ---- Force vector text embedding ----
 mpl.rcParams['pdf.fonttype'] = 42
@@ -546,6 +547,295 @@ def plot_mitigation_by_ease(df, out_dir, seconds, keep_only_who_changed_mind):
 	plt.savefig(os.path.join(out_dir, f"mitigation_by_ease-s={seconds}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
 	plt.show()
 
+def plot_effort_reliance(df, out_dir, seconds):
+	"""
+	Show whether and how much 'How much effort...' correlates with
+	over-/under-reliance, split by MAGIX vs non-MAGIX.
+
+	- Lines: rate of Over-reliance / Under-reliance at each effort level.
+	- Text: Spearman rho (individual-level) with p-values for each group.
+	"""
+
+	# Keep only rows with a valid numeric effort
+	effort_col = "How much effort did it take to understand and complete this task?"
+	d = df.copy()
+	d = d[d["Seconds"] >= seconds]
+	if "Reliance category" not in d.columns:
+		d["Reliance category"] = d.apply(label_reliance, axis=1)
+	d["Effort"] = pd.to_numeric(d[effort_col], errors="coerce")+1
+	d = d.dropna(subset=["Effort"])
+
+	# Binary flags for reliance types
+	d["is_over"] = (d["Reliance category"] == "Over-reliance").astype(int)
+	d["is_under"] = (d["Reliance category"] == "Under-reliance").astype(int)
+
+	# Aggregate: rate per effort level within MAGIX vs non-MAGIX
+	grp = d.groupby(["Explanation is MAGIX-defined", "Effort"])
+	rates = grp.agg(over_rate=("is_over", "mean"),
+					under_rate=("is_under", "mean"),
+					n=("is_over", "size")).reset_index()
+
+	# Spearman correlations (individual level, per MAGIX group)
+	stats = {}
+	for magix_flag, sub in d.groupby("Explanation is MAGIX-defined"):
+		# Only compute if at least two distinct effort values are present
+		if sub["Effort"].nunique() >= 2:
+			rho_over, p_over = spearmanr(sub["Effort"], sub["is_over"])
+			rho_under, p_under = spearmanr(sub["Effort"], sub["is_under"])
+		else:
+			rho_over = rho_under = np.nan
+			p_over = p_under = np.nan
+		stats[magix_flag] = {"rho_over": rho_over, "p_over": p_over,
+							 "rho_under": rho_under, "p_under": p_under,
+							 "n": len(sub)}
+
+	# Plot
+	expl_colors = {False: "C0", True: "C1"}
+	fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+	for ax, rate_col, title in [
+		(axes[0], "over_rate", "Over-reliance rate vs Effort"),
+		(axes[1], "under_rate", "Under-reliance rate vs Effort"),
+	]:
+		for magix_flag in [False, True]:
+			sub = rates[rates["Explanation is MAGIX-defined"] == magix_flag].sort_values("Effort")
+			if sub.empty:
+				continue
+			ax.plot(sub["Effort"], sub[rate_col], marker="o",
+					label=("MAGIX" if magix_flag else "Non-MAGIX"),
+					linewidth=1.5)
+			# Show counts at each point (optional but handy)
+			for _, r in sub.iterrows():
+				ax.annotate(f"n={int(r['n'])}",
+							(r["Effort"], r[rate_col]),
+							xytext=(0, 6), textcoords="offset points",
+							ha="center", va="bottom", fontsize=8)
+
+		ax.set_title(title)
+		ax.set_xlabel("Effort (1-5)")
+		if ax is axes[0]:
+			ax.set_ylabel("Proportion")
+			ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+		ax.set_xticks(sorted(rates["Effort"].unique()))
+		ax.grid(True, alpha=0.3)
+
+	# Compose a compact stats box
+	txt_lines = []
+	for flag in [False, True]:
+		lab = "Non-MAGIX" if not flag else "MAGIX"
+		st = stats.get(flag, {})
+		txt_lines.append(
+			f"{lab}: ρ_over={st.get('rho_over', np.nan):.2f} (p={st.get('p_over', np.nan):.3f}), "
+			f"ρ_under={st.get('rho_under', np.nan):.2f} (p={st.get('p_under', np.nan):.3f}), "
+			f"n={st.get('n', 0)}"
+		)
+	fig.text(0.02, 0.98, "\n".join(txt_lines), ha="left", va="top", fontsize=9,
+			 bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.9, edgecolor="none"))
+
+	# Shared legend
+	axes[1].legend(title="Explanation type", frameon=True, loc="lower right")
+
+	fig.suptitle("Effort vs Over/Under-reliance by explanation type", y=1.04, fontsize=12)
+	fig.tight_layout()
+	out_path = os.path.join(out_dir, f"effort_reliance_correlation_all-s={seconds}.pdf")
+	plt.savefig(out_path, bbox_inches="tight")
+	plt.show()
+	print("\n".join(txt_lines))
+	print(f"Saved to: {out_path}")
+
+def plot_effort_reliance_by_scenario(df, out_dir, seconds):
+	effort_col = "How much effort did it take to understand and complete this task?"
+	scenario_col = "Scenario"
+
+	# Prepare data
+	d = df[df["Seconds"] >= seconds].copy()
+	if "Reliance category" not in d.columns:
+		d["Reliance category"] = d.apply(label_reliance, axis=1)
+	d["Effort"] = pd.to_numeric(d[effort_col], errors="coerce") + 1
+	d = d.dropna(subset=["Effort", scenario_col])
+	d["is_over"] = (d["Reliance category"] == "Over-reliance").astype(int)
+	d["is_under"] = (d["Reliance category"] == "Under-reliance").astype(int)
+
+	scenarios = sorted(d[scenario_col].unique())
+	cmap = plt.get_cmap('tab10')
+
+	fig, axes = plt.subplots(2, 2, figsize=(16, 10), sharex=True, sharey='row', facecolor='white')
+	metrics = [('is_over', 'Over-reliance'), ('is_under', 'Under-reliance')]
+	magix_flags = [False, True]
+
+	marker_styles = ['o', 's', '^', 'D', 'v', 'P', 'X', '*']
+	line_width = 2.0
+	marker_size = 8
+	title_fs = 14
+	label_fs = 12
+	tick_fs = 10
+	legend_fs = 10
+
+	# placeholder for the first‐quadrant stats legend
+	first_stats_leg = None
+
+	for i, (metric, mlabel) in enumerate(metrics):
+		for j, flag in enumerate(magix_flags):
+			ax = axes[i, j]
+			stats_lines = []
+
+			for idx, scen in enumerate(scenarios):
+				sub = d[(d[scenario_col] == scen) & (d['Explanation is MAGIX-defined'] == flag)]
+				grp = sub.groupby('Effort')[metric].agg(mean='mean', n='size').reset_index()
+				if grp.empty:
+					continue
+
+				ax.plot(
+					grp['Effort'], grp['mean'],
+					marker=marker_styles[idx % len(marker_styles)],
+					markersize=marker_size,
+					linewidth=line_width,
+					label=scen,
+					color=cmap(idx)
+				)
+
+				for _, r in grp.iterrows():
+					ax.text(
+						r['Effort'], r['mean'], f"{int(r['n'])}",
+						fontsize=8, va='bottom', ha='center', alpha=0.7,
+						bbox=dict(facecolor='white', alpha=0.8, pad=1, edgecolor='none')
+					)
+
+				if sub['Effort'].nunique() >= 2:
+					rho, p = spearmanr(sub['Effort'], sub[metric])
+					stats_lines.append(f"{scen}: ρ={rho:.2f} (p={p:.3f}), n={len(sub)}")
+
+			# draw stats legend in each subplot
+			if stats_lines:
+				stats_handles = [Line2D([], [], linestyle='') for _ in stats_lines]
+				stats_leg = ax.legend(
+					stats_handles, stats_lines,
+					loc='lower center',
+					bbox_to_anchor=(0.5, 0.05),
+					frameon=True,
+					fontsize=9,
+					borderaxespad=0,
+					ncol=1
+				)
+				# remember the first quadrant’s stats legend
+				if i == 0 and j == 0:
+					first_stats_leg = stats_leg
+
+			ax.set_title(f"{mlabel} — {'MAGIX' if flag else 'Non-MAGIX'}", fontsize=title_fs)
+			if i == 1:
+				ax.set_xlabel('Effort (1–5)', fontsize=label_fs)
+			if j == 0:
+				ax.set_ylabel('Proportion', fontsize=label_fs)
+				ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+			ax.grid(True, which='major', linestyle='--', linewidth=0.5, alpha=0.6)
+			ax.set_xticks(sorted(d['Effort'].unique()))
+			ax.tick_params(axis='both', labelsize=tick_fs)
+
+	# add scenario legend only to first quadrant, **without** removing stats
+	first_ax = axes[0, 0]
+	sc_handles, sc_labels = first_ax.get_legend_handles_labels()
+	scen_leg = first_ax.legend(
+		sc_handles, sc_labels,
+		title='Scenario',
+		fontsize=legend_fs,
+		title_fontsize=legend_fs,
+		loc='upper left'
+	)
+	# re‐add the stats legend on top of it
+	if first_stats_leg is not None:
+		first_ax.add_artist(first_stats_leg)
+
+	fig.suptitle(f"Effort vs Reliance across scenarios (seconds ≥ {seconds})", fontsize=18, y=0.98)
+	plt.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.12, hspace=0.1, wspace=0.05)
+
+	out_path = os.path.join(out_dir, f"effort_reliance_comparison_by_scenario_s={seconds}.pdf")
+	plt.savefig(out_path, dpi=300, bbox_inches='tight')
+	plt.show()
+	print(f"Saved figure to: {out_path}")
+
+
+def plot_effort_distribution(df, out_dir, seconds, cmap_name='Set3'):
+	"""
+	Improved boxplot of 'How much effort...' Likert responses by scenario,
+	using a light pastel colormap and readable annotation backgrounds.
+	"""
+	# Filter and prepare data
+	effort_col = "How much effort did it take to understand and complete this task?"
+	d = df.copy()
+	d = d[d["Seconds"] >= seconds]
+	if "Reliance category" not in d.columns:
+		d["Reliance category"] = d.apply(label_reliance, axis=1)
+	d["Effort"] = pd.to_numeric(d[effort_col], errors="coerce") + 1
+	d = d.dropna(subset=["Effort"])
+
+	# Gather per-scenario
+	scenarios = sorted(d["Scenario"].unique())
+	data = [d[d["Scenario"] == sc]["Effort"].values for sc in scenarios]
+
+	# Compute stats for annotation
+	stats = {}
+	for sc, vals in zip(scenarios, data):
+		q1, med, q3 = np.percentile(vals, [25, 50, 75])
+		mean = np.mean(vals)
+		stats[sc] = {"q1": q1, "med": med, "q3": q3, "mean": mean}
+
+	# Set up colormap (light pastel)
+	cmap = plt.get_cmap(cmap_name, len(scenarios))
+	colors = [cmap(i) for i in range(len(scenarios))]
+
+	# Plot
+	fig, ax = plt.subplots(figsize=(10, 6))
+	bp = ax.boxplot(
+		data,
+		labels=[sc.replace("Scenario", "Scen.") for sc in scenarios],
+		showmeans=True,
+		patch_artist=True,
+		boxprops=dict(linewidth=1.5),
+		whiskerprops=dict(color='gray', linewidth=1),
+		capprops=dict(color='gray', linewidth=1),
+		medianprops=dict(color='black', linewidth=2),
+		meanprops=dict(marker='D', markeredgecolor='black', markerfacecolor='white'),
+		flierprops=dict(marker='o', markerfacecolor='none', markeredgecolor='gray', markersize=5, alpha=0.6)
+	)
+
+	# Color each box with pastel
+	for patch, color in zip(bp['boxes'], colors):
+		patch.set_facecolor(color)
+		patch.set_alpha(0.8)
+
+	# Axes labels and title styling
+	ax.set_title('Effort Distribution by Scenario', fontsize=16, fontweight='bold')
+	ax.set_xlabel('Scenario', fontsize=14)
+	ax.set_ylabel('Effort (1-5)', fontsize=14)
+	ax.tick_params(axis='x', labelrotation=45, labelsize=12)
+	ax.tick_params(axis='y', labelsize=12)
+	ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+	ax.grid(axis='y', linestyle='--', alpha=0.5)
+
+	# Annotate stats with white background boxes
+	ymin, ymax = ax.get_ylim()
+	span = ymax - ymin
+	offsets = {'q1': span * 0.02, 'med': span * 0.05, 'q3': span * 0.08, 'mean': span * 0.11}
+	for i, sc in enumerate(scenarios, start=1):
+		s = stats[sc]
+		for key, style in zip(['q1','med','q3','mean'], ['Q1','Med','Q3','Mean']):
+			y_val = s[key] + offsets[key]
+			ax.text(
+				i,
+				y_val,
+				f"{style}={s[key]:.2f}",
+				ha='center', va='bottom', fontsize=8,
+				color='black',
+				bbox=dict(facecolor='white', alpha=0.8, pad=1, edgecolor='none')
+			)
+
+	plt.tight_layout()
+
+	# Save and show
+	out_path = os.path.join(out_dir, f"effort_distribution_{seconds}.pdf")
+	plt.savefig(out_path)
+	plt.show()
+	print(f"Saved improved effort distribution plot to {out_path}")
+
 
 def main():
 	parser = argparse.ArgumentParser(description="Analyse reliance patterns in scenario CSVs.")
@@ -560,6 +850,9 @@ def main():
 	raw_df = load_frames(args.input)
 	raw_df = filter_invalid_rows(raw_df)
 
+	plot_effort_distribution(raw_df, args.output, args.min_seconds)
+	plot_effort_reliance(raw_df, args.output, args.min_seconds)
+	plot_effort_reliance_by_scenario(raw_df, args.output, args.min_seconds)
 	plot_corrections(raw_df, args.output, args.min_seconds)
 	plot_mitigation_by_ease(raw_df, args.output, args.min_seconds, args.keep_only_who_changed_mind)
 
