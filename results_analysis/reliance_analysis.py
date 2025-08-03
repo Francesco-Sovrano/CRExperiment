@@ -114,7 +114,7 @@ def analyse(df, min_seconds, keep_only_who_changed_mind, expected_answer=None):
 
 	# df = df[df["How much do you trust AI systems in general?"] <= 3]
 	# df = df[df["How would you rate your overall attitude toward Artificial Intelligence (AI)?"] <= 3]
-	# df = df[df['How much effort did it take to understand and complete this task?'] <= 3]
+	# df = df[df['How much effort did it take to understand and complete this task?'] >= 3]
 	df = df[
 		(
 			# Keep only who understood the explanations
