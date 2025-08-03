@@ -566,8 +566,8 @@ def plot_effort_reliance(df, out_dir, seconds):
 	d = d.dropna(subset=["Effort"])
 
 	# Binary flags for reliance types
-	d["is_over"] = (d["Reliance category"] == "Over-reliance").astype(int)
-	d["is_under"] = (d["Reliance category"] == "Under-reliance").astype(int)
+	d["is_over"] = ((d["Response before explanation"] == "Accept") & (d["Expected answer"] == "Reject")).astype(int)
+	d["is_under"] = ((d["Response before explanation"] == "Reject") & (d["Expected answer"] == "Accept")).astype(int)
 
 	# Aggregate: rate per effort level within MAGIX vs non-MAGIX
 	grp = d.groupby(["Explanation is MAGIX-defined", "Effort"])
@@ -652,8 +652,8 @@ def plot_effort_reliance_by_scenario(df, out_dir, seconds):
 		d["Reliance category"] = d.apply(label_reliance, axis=1)
 	d["Effort"] = pd.to_numeric(d[effort_col], errors="coerce") + 1
 	d = d.dropna(subset=["Effort", scenario_col])
-	d["is_over"] = (d["Reliance category"] == "Over-reliance").astype(int)
-	d["is_under"] = (d["Reliance category"] == "Under-reliance").astype(int)
+	d["is_over"] = ((d["Response before explanation"] == "Accept") & (d["Expected answer"] == "Reject")).astype(int)
+	d["is_under"] = ((d["Response before explanation"] == "Reject") & (d["Expected answer"] == "Accept")).astype(int)
 
 	scenarios = sorted(d[scenario_col].unique())
 	cmap = plt.get_cmap('tab10')
