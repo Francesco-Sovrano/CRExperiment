@@ -1,12 +1,3 @@
-
-"""
-reliance_analysis.py  —  Seconds=120 by default, clearer legends, hatching for readability.
-
-- Filters by Seconds (default 120).
-- Filters to usefulness/helpfulness ratings in {3,4}.
-- Outputs four improved plots (counts, proportions, response-changes, per-scenario composition).
-- Uses hatching + labels so meaning does not depend on color.
-"""
 import argparse, os, zipfile, glob, tempfile, shutil
 import pandas as pd
 import matplotlib as mpl
@@ -626,6 +617,8 @@ def plot_reliance_vs_trust_attitude_effort(df, out_dir, seconds=0):
 			ax.set_ylabel('Proportion')
 			ax.yaxis.set_major_formatter(PercentFormatter(1.0))
 		ax.grid(alpha=0.3)
+		# Force x-ticks to be integers
+		ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 		# Compute Spearman correlations
 		stats[key] = {}
 		for flag, label in [(False, 'Non-MAGIX'), (True, 'MAGIX')]:
@@ -661,7 +654,7 @@ def plot_reliance_vs_trust_attitude_effort(df, out_dir, seconds=0):
 
 	# Save output
 	os.makedirs(out_dir, exist_ok=True)
-	out_path = os.path.join(out_dir, f"reliance_vs_trust_attitude_effort_s={seconds}.pdf")
+	out_path = os.path.join(out_dir, f"reliance_vs_trust_attitude_effort-s={seconds}.pdf")
 	plt.savefig(out_path, bbox_inches='tight')
 	plt.show()
 	print(f"Saved figure to: {out_path}")
@@ -772,11 +765,10 @@ def plot_effort_reliance_by_scenario(df, out_dir, seconds):
 	fig.suptitle(f"Effort vs Reliance across scenarios (seconds ≥ {seconds})", fontsize=18, y=0.98)
 	plt.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.12, hspace=0.1, wspace=0.05)
 
-	out_path = os.path.join(out_dir, f"effort_reliance_comparison_by_scenario_s={seconds}.pdf")
+	out_path = os.path.join(out_dir, f"effort_reliance_comparison_by_scenario-s={seconds}.pdf")
 	plt.savefig(out_path, dpi=300, bbox_inches='tight')
 	plt.show()
 	print(f"Saved figure to: {out_path}")
-
 
 def plot_effort_distribution(df, out_dir, seconds, cmap_name='Set3'):
 	"""
@@ -856,11 +848,101 @@ def plot_effort_distribution(df, out_dir, seconds, cmap_name='Set3'):
 	plt.tight_layout()
 
 	# Save and show
-	out_path = os.path.join(out_dir, f"effort_distribution_{seconds}.pdf")
+	out_path = os.path.join(out_dir, f"effort_distribution-s={seconds}.pdf")
 	plt.savefig(out_path)
 	plt.show()
 	print(f"Saved improved effort distribution plot to {out_path}")
 
+def visualize_distribution(df, out_dir, seconds=0, figsize=(8, 5)):
+	"""
+	Compute and plot the distribution of participants across:
+	  - Scenario
+	  - AI correctness (Accept → AI Correct, Reject → AI Incorrect)
+	  - Explanation is MAGIX-defined (True/False)
+
+	Parameters
+	----------
+	df : pandas.DataFrame
+		DataFrame must contain columns
+		"Scenario", "Expected answer", and "Explanation is MAGIX-defined".
+	figsize : tuple, default (8, 6)
+		Figure size.
+
+	Returns
+	-------
+	table_counts : pandas.DataFrame
+		Multi‐indexed table of raw counts with index=(Scenario, AI correctness)
+		and columns=[False, True].
+	"""
+	# 0) Filter and copy
+	df = df.copy()
+	df = df[df.get('Seconds', 0) >= seconds]
+
+	# 1) Map Expected answer to AI correctness labels
+	df['AI correctness'] = df['Expected answer'].map({
+		'Accept': 'AI Correct',
+		'Reject': 'AI Incorrect'
+	})
+
+	# 2) Build raw counts table
+	table_counts = pd.crosstab(
+		index=[df["Scenario"], df["AI correctness"]],
+		columns=df["Explanation is MAGIX-defined"],
+		dropna=False
+	).sort_index()
+
+	# 3) Compute proportions table (row-wise)
+	table_props = table_counts.div(table_counts.sum(axis=1), axis=0)
+
+	# 4) Choose table for plotting
+	table_to_plot = table_counts
+
+	# 5) Plot
+	fig, ax = plt.subplots(figsize=figsize)
+	table_to_plot.plot(
+		kind="bar",
+		stacked=True,
+		ax=ax,
+		width=0.8
+	)
+	ax.set_ylabel("Count")
+	ax.set_title("Participants by Scenario / AI correctness / MAGIX Explanation")
+	ax.set_xlabel("")
+
+	# Tidy up legend
+	ax.legend(
+		title="MAGIX Explanation",
+		loc="upper right",
+		labels=["Not MAGIX-defined", "MAGIX-defined"]
+	)
+
+	# 6) Annotate with both counts and proportions (with white semi-transparent background)
+	for i, container in enumerate(ax.containers):
+		raw_vals = table_counts.values[:, i]
+		prop_vals = table_props.values[:, i]
+		labels = []
+		for raw, prop in zip(raw_vals, prop_vals):
+			labels.append(f"{int(raw)}\n({prop*100:.1f}%)")
+		ax.bar_label(
+			container,
+			labels=labels,
+			label_type='center',
+			bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=0.2)
+		)
+
+	# 7) Improve readability of x-axis tick labels
+	combined_labels = [f"{scenario}\n{ai_label}" for scenario, ai_label in table_counts.index]
+	ax.set_xticks(range(len(combined_labels)))
+	ax.set_xticklabels(combined_labels, rotation=45, ha='right', fontsize=10)
+
+	plt.tight_layout()
+
+	# 8) Save and show
+	out_path = os.path.join(out_dir, f"participants_distribution-s={seconds}.pdf")
+	plt.savefig(out_path)
+	plt.show()
+
+	return table_counts
 
 def main():
 	parser = argparse.ArgumentParser(description="Analyse reliance patterns in scenario CSVs.")
@@ -874,6 +956,7 @@ def main():
 
 	raw_df = load_frames(args.input)
 	raw_df = filter_invalid_rows(raw_df)
+	visualize_distribution(raw_df, args.output, args.min_seconds)
 
 	plot_effort_distribution(raw_df, args.output, args.min_seconds)
 	plot_reliance_vs_trust_attitude_effort(raw_df, args.output, args.min_seconds)
