@@ -99,7 +99,9 @@ def filter_invalid_rows(df):
 def analyse(df, min_seconds, keep_only_who_changed_mind, expected_answer=None):
 	df = df.copy()
 	# Keep only who spent enough time
+	old_len = len(df)
 	df = df[df["Seconds"] >= min_seconds]
+	print(f'{old_len-len(df)} entries were removed because produce in less than {min_seconds} seconds')
 	if expected_answer:
 		df = df[df["Expected answer"] == expected_answer]
 
@@ -906,12 +908,12 @@ def visualize_distribution(df, out_dir, seconds=0, figsize=(8, 5)):
 		width=0.8
 	)
 	ax.set_ylabel("Count")
-	ax.set_title("Participants by Scenario / AI correctness / MAGIX Explanation")
+	ax.set_title("Participants by Scenario / AI correctness / Explanation")
 	ax.set_xlabel("")
 
 	# Tidy up legend
 	ax.legend(
-		title="MAGIX Explanation",
+		title="Explanation",
 		loc="upper right",
 		labels=["Not MAGIX-defined", "MAGIX-defined"]
 	)
