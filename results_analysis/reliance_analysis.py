@@ -281,9 +281,13 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 			if len(scores_non)>0 and len(scores_mag)>0:
 				# Mann-Whitney U test
 				U, p = mannwhitneyu(scores_non, scores_mag, alternative='greater' if np.mean(scores_non) > np.mean(scores_mag) else 'less')
-				# Cliff's delta effect size: (2*U)/(n1*n2) - 1
-				n1, n2 = len(scores_non), len(scores_mag)
-				delta = (2 * U) / (n1 * n2) - 1
+				# # Cliff's delta effect size: (2*U)/(n1*n2) - 1
+				# n1, n2 = len(scores_non), len(scores_mag)
+				# delta = (2 * U) / (n1 * n2) - 1
+				# Cohen's d
+				diff = np.mean(scores_mag) - np.mean(scores_non)
+				pooled_var = ((scores_non.var(ddof=1) + scores_mag.var(ddof=1)) / 2)
+				d = diff / np.sqrt(pooled_var) if pooled_var > 0 else np.nan
 				# # Run Chi-squared test
 				# non_counts = scores_non.value_counts().reindex([0, 1], fill_value=0)
 				# mag_counts = scores_mag.value_counts().reindex([0, 1], fill_value=0)
@@ -294,10 +298,11 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 				# chi2, p, dof, expected = chi2_contingency(contingency)
 			else:
 				p = np.nan
-				delta = np.nan
-			p_vals[scen] = (p,delta)
+				# delta = np.nan
+				d = np.nan
+			p_vals[scen] = (p,d)
 		for i, scen in enumerate(scenarios):
-			ax.text(x[i], 1.07, f"p={p_vals[scen][0]:.3f}\n(Δ={p_vals[scen][1]:.2f})", weight ='bold' if p_vals[scen][0] < 0.05 else 'normal', ha='center', va='bottom', fontsize=9)
+			ax.text(x[i], 1.07, f"p={p_vals[scen][0]:.3f}\n(d={p_vals[scen][1]:.2f})", weight ='bold' if p_vals[scen][0] < 0.05 else 'normal', ha='center', va='bottom', fontsize=9)
 
 		ax.set_xticks(x)
 		ax.set_xticklabels(list(map(lambda x: x.replace('Scenario','Scen.'), scenarios)), rotation=0, ha='center', fontsize=9)
