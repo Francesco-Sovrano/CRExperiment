@@ -989,7 +989,7 @@ def main():
 
 	raw_df = load_frames(args.input)
 	raw_df = filter_invalid_rows(raw_df)
-	visualize_distribution(raw_df, args.output)
+	visualize_distribution(raw_df, args.output, args.min_seconds)
 	# plot_per_scenario_multi(raw_df, args.output)
 
 	plot_effort_distribution(raw_df, args.output, args.min_seconds)
