@@ -1,5 +1,6 @@
 .idea/*
 *.log
+*.zip
 
 # MAC-only files
 .DS_Store
