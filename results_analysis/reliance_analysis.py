@@ -6,6 +6,7 @@ from matplotlib import colors as mcolors
 from matplotlib.patches import Patch
 from matplotlib.ticker import PercentFormatter, MaxNLocator
 from statsmodels.stats.proportion import proportions_ztest
+import statsmodels.stats.api as sms
 from scipy.stats import chi2_contingency, fisher_exact, mannwhitneyu, spearmanr
 import numpy as np
 from matplotlib.lines import Line2D
@@ -278,8 +279,11 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 			scores_non = sub[sub['Explanation is MAGIX-defined'] == False]['Reliance category'].map(score_map)
 			scores_mag = sub[sub['Explanation is MAGIX-defined'] == True]['Reliance category'].map(score_map)
 			if len(scores_non)>0 and len(scores_mag)>0:
-				# Run Mann-Whitney U test
-				_, p = mannwhitneyu(scores_non, scores_mag, alternative='greater' if np.mean(scores_non) > np.mean(scores_mag) else 'less')
+				# Mann-Whitney U test
+				U, p = mannwhitneyu(scores_non, scores_mag, alternative='greater' if np.mean(scores_non) > np.mean(scores_mag) else 'less')
+				# Cliff's delta effect size: (2*U)/(n1*n2) - 1
+				n1, n2 = len(scores_non), len(scores_mag)
+				delta = (2 * U) / (n1 * n2) - 1
 				# # Run Chi-squared test
 				# non_counts = scores_non.value_counts().reindex([0, 1], fill_value=0)
 				# mag_counts = scores_mag.value_counts().reindex([0, 1], fill_value=0)
@@ -290,9 +294,10 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 				# chi2, p, dof, expected = chi2_contingency(contingency)
 			else:
 				p = np.nan
-			p_vals[scen] = p
+				delta = np.nan
+			p_vals[scen] = (p,delta)
 		for i, scen in enumerate(scenarios):
-			ax.text(x[i], 1.05, f"p={p_vals[scen]:.3f}", weight ='bold' if p_vals[scen] < 0.05 else 'normal', ha='center', va='bottom', fontsize=9)
+			ax.text(x[i], 1.07, f"p={p_vals[scen][0]:.3f}\n(Δ={p_vals[scen][1]:.2f})", weight ='bold' if p_vals[scen][0] < 0.05 else 'normal', ha='center', va='bottom', fontsize=9)
 
 		ax.set_xticks(x)
 		ax.set_xticklabels(list(map(lambda x: x.replace('Scenario','Scen.'), scenarios)), rotation=0, ha='center', fontsize=9)
@@ -300,7 +305,7 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 		if ax is axes[0]:
 			ax.set_ylabel('Proportion within explanation type', fontsize=9)
 			ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-		ax.set_ylim(0, 1.1)
+		ax.set_ylim(0, 1.2)
 		ax.yaxis.set_major_locator(MaxNLocator(5))
 		ax.tick_params(axis='y', labelsize=9)
 
@@ -485,9 +490,11 @@ def plot_mitigation_by_ease(df, out_dir, seconds=0, keep_only_who_changed_mind=F
 				cnt1, tot1 = 0, 0
 			if tot0 > 0 and tot1 > 0:
 				_, pval = proportions_ztest([cnt0, cnt1], [tot0, tot1])
+				effect = sms.proportion_effectsize(cnt1/tot1, cnt0/tot0)
 			else:
 				pval = np.nan
-			p_values[e] = pval
+				effect = np.nan
+			p_values[e] = (pval, effect)
 
 		# Plot lines and annotate counts and p-values
 		y_values = {}
@@ -513,13 +520,13 @@ def plot_mitigation_by_ease(df, out_dir, seconds=0, keep_only_who_changed_mind=F
 
 		# P-value annotations higher and bold when <0.05
 		for e in eases:
-			pval = p_values.get(e, np.nan)
+			pval, effect = p_values.get(e, np.nan)
 			if np.isfinite(pval):
 				y0 = y_values.get(False)[eases.index(e)]
 				y1 = y_values.get(True)[eases.index(e)]
 				y_max = max([yv for yv in (y0, y1) if np.isfinite(yv)] + [0])
 				weight = 'bold' if pval < 0.05 else 'normal'
-				ax.annotate(f"p={pval:.3f}", (e, y_max), xytext=(0, 12), textcoords="offset points",
+				ax.annotate(f"p={pval:.3f}\n(h={effect:.2f})", (e, y_max+0.01), xytext=(0, 12), textcoords="offset points",
 							ha="center", va="bottom", fontsize=8, fontweight=weight, bbox=dict(
 						boxstyle="round,pad=0.2",
 						facecolor="white",
