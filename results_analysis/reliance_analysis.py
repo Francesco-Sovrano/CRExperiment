@@ -127,7 +127,8 @@ def analyse(df, min_seconds=0, keep_only_who_changed_mind=True, do_balance_treat
 	
 	# df = df[df["How easy was it to understand the explanation?"] > 3]
 	
-	df = balance_treatments(df)
+	if do_balance_treatments:
+		df = balance_treatments(df)
 
 	counts = (df.groupby(["Explanation is MAGIX-defined","Reliance category"])
 				.size().unstack(fill_value=0)
