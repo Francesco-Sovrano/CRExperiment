@@ -112,12 +112,12 @@ def analyse(df, min_seconds=0, keep_only_who_changed_mind=True, do_balance_treat
 
 	if filter_by_minimum_effort: # Keep only who put some effort
 		df = df[(df['How much effort did it take to understand and complete this task?'] >= 1)]
-	df = df[(df["How easy was it to understand the explanation?"] >= 2)] # Keep only who understood the explanation
+	df = df[(df["How easy was it to understand the explanation?"] >= 3)] # Keep only who understood the explanation
 	df = df[(df["Did the explanation help you evaluate the AI's output?"] >= 1)] # Keep only who said was helped by the explanation
 	if keep_only_who_changed_mind: # Keep only who actually used the explanations, updating their mental model
 		df = df[
-			(df["How useful was the explanation provided?"] >= 1)
-			& (
+			# (df["How useful was the explanation provided?"] >= 1)
+			(
 				(df["How confident are you in the decision you made? (without explanation)"] != df["How confident are you in the decision you made? (with explanation)"])
 				| (df["Explanation changed mind"] == True)
 			)
@@ -222,7 +222,7 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 		base['prop'] = base['n'] / totals
 		if scenarios is None:
 			scenarios = sorted(base['Scenario'].unique())
-		results.append((label, base))
+		results.append((label, base, df_sub))
 
 	plt.rcParams.update({
 		# … other params …
@@ -237,7 +237,7 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 	expl_colors = {False: 'C0', True: 'C1'}
 	score_map = {"Under-reliance": 0, "Appropriate accept": 1, "Appropriate reject": 1, "Over-reliance": 0}
 
-	for ax, (label, base) in zip(axes, results):
+	for ax, (label, base, df_sub) in zip(axes, results):
 		for idx, expl in enumerate([False, True]):
 			subset = base[base['Explanation is MAGIX-defined'] == expl]
 			pivot = subset.pivot(index='Scenario', columns='Reliance category', values='prop') \
@@ -269,13 +269,9 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 						)
 				bottom += vals
 		# p-value annotation via Mann–Whitney U
-		df_label = df[df['Seconds'] >= min_seconds].copy()
-		if label != 'All':
-			df_label = df_label[df_label['Expected answer'] == label]
-		# compute p-values per scenario
 		p_vals = {}
 		for scen in scenarios:
-			sub = df_label[df_label['Scenario'] == scen]
+			sub = df_sub[df_sub['Scenario'] == scen]
 			scores_non = sub[sub['Explanation is MAGIX-defined'] == False]['Reliance category'].map(score_map)
 			scores_mag = sub[sub['Explanation is MAGIX-defined'] == True]['Reliance category'].map(score_map)
 			if len(scores_non)>0 and len(scores_mag)>0:
@@ -296,10 +292,15 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 				# 	[mag_counts.loc[0], mag_counts.loc[1]]
 				# ]
 				# chi2, p, dof, expected = chi2_contingency(contingency)
+				# # total N
+				# N = np.sum(contingency)
+				# # Cohen's w
+				# w = np.sqrt(chi2 / N)
 			else:
 				p = np.nan
 				# delta = np.nan
 				d = np.nan
+				# w = np.nan
 			p_vals[scen] = (p,d)
 		for i, scen in enumerate(scenarios):
 			ax.text(x[i], 1.07, f"p={p_vals[scen][0]:.3f}\n(d={p_vals[scen][1]:.2f})", weight ='bold' if p_vals[scen][0] < 0.05 else 'normal', ha='center', va='bottom', fontsize=9)
@@ -441,8 +442,8 @@ def plot_mitigation_by_ease(df, out_dir, seconds=0, keep_only_who_changed_mind=F
 	d = d[(d["Did the explanation help you evaluate the AI's output?"] >= 1)] # Keep only who said was helped by the explanation
 	if keep_only_who_changed_mind: # Keep only who actually used the explanations, updating their mental model
 		d = d[
-			(d["How useful was the explanation provided?"] >= 1)
-			& (
+			# (d["How useful was the explanation provided?"] >= 1)
+			(
 				(d["How confident are you in the decision you made? (without explanation)"] != d["How confident are you in the decision you made? (with explanation)"])
 				| (d["Explanation changed mind"] == True)
 			)
