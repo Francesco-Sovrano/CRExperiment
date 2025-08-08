@@ -714,7 +714,7 @@ def plot_reliance_vs_trust_attitude_effort(df, out_dir, seconds=0, annotate_n=Tr
 		plt.show()
 		print(f"Saved figure to: {out_path}")
 
-def plot_reliance_vs_trust_attitude_effort_by_scenario(df, out_dir, seconds=0, annotate_n=True, show_stats=True, per_cell_w=3, per_cell_h=2.1, base_font=8):
+def plot_reliance_vs_trust_attitude_effort_by_scenario(df, out_dir, seconds=0, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False, annotate_n=True, show_stats=True, per_cell_w=3, per_cell_h=2.1, base_font=8):
 	def natural_key(s):
 		s = str(s)
 		return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
@@ -897,7 +897,7 @@ def plot_reliance_vs_trust_attitude_effort_by_scenario(df, out_dir, seconds=0, a
 
 
 		os.makedirs(out_dir, exist_ok=True)
-		out_path = os.path.join(out_dir, f"reliance_vs_trust_attitude_effort_by_scenario-s={seconds}.pdf")
+		out_path = os.path.join(out_dir, f"reliance_vs_trust_attitude_effort_by_scenario-s={seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf")
 		plt.savefig(out_path, bbox_inches='tight')
 		plt.show()
 		print(f"Saved figure to: {out_path}")
@@ -1242,6 +1242,7 @@ def main():
 
 	df, counts = analyse(raw_df, min_seconds=args.min_seconds, keep_only_who_changed_mind=args.keep_only_who_changed_mind, do_balance_treatments=args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
 	visualize_distribution(df, args.output, args.min_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
+	# plot_reliance_vs_trust_attitude_effort_by_scenario(df, args.output, args.min_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
 	plot_mitigation_by_ease(raw_df, args.output, args.min_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
 	plot_per_scenario_multi(df, args.output, args.min_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
 	# plot_changes(df, args.output, args.min_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
