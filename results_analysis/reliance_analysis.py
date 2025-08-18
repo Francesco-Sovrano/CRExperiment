@@ -101,7 +101,7 @@ def filter_invalid_rows(df):
 	df["Scenario"] = df["Task file"].apply(tidy_task)
 	df["Reliance category"] = df.apply(label_reliance, axis=1)
 	df = df.drop_duplicates(subset=["Prolific ID", "Scenario"], keep="last")
-	# Keep only those IDs that appear in 4 scenarios
+	# # Keep only those IDs that appear in 4 scenarios
 	# df = df[df.groupby("Prolific ID")["Scenario"].transform("nunique").eq(4)]
 	return df
 
@@ -246,7 +246,8 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 
 	x = np.arange(len(scenarios))
 	width = 0.3
-	fig, axes = plt.subplots(1, 3, figsize=(5*2.5, 4), sharey=True)
+	width_per_scenario = 2.5
+	fig, axes = plt.subplots(1, 3, figsize=(len(scenarios) * width_per_scenario, 4), sharey=True)
 
 	expl_colors = {False: 'C0', True: 'C1'}
 	score_map = {"Under-reliance": 0, "Appropriate accept": 1, "Appropriate reject": 1, "Over-reliance": 0}
