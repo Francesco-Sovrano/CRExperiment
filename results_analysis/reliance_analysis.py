@@ -63,10 +63,15 @@ def load_frames(path):
 		questionnaire_df = pd.read_csv(questionnaire_path)
 		
 		pattern = os.path.join(base, "**", "scenario_*.csv")
-		frames = [pd.merge(questionnaire_df, pd.read_csv(f), on="Prolific ID", how="outer") for f in glob.glob(pattern, recursive=True)]
+		frames = [
+			pd.merge(questionnaire_df, pd.read_csv(f), on="Prolific ID", how="right") 
+			for f in glob.glob(pattern, recursive=True)
+		]
 		if not frames:
 			raise FileNotFoundError("No scenario_*.csv files found.")
-		return pd.concat(frames, ignore_index=True)
+		all_data = pd.concat(frames, ignore_index=True)
+		all_data.to_csv("formatted_results/all_data_combined.csv", index=False)
+		return all_data
 	finally:
 		if tmp_dir and os.path.isdir(tmp_dir):
 			shutil.rmtree(tmp_dir)
@@ -89,6 +94,7 @@ def tidy_task(val):
 	return str(val).split("_")[0].replace('task','scenario ').capitalize()
 
 def filter_invalid_rows(df):
+	df = df.copy()
 	# Keep only valid Prolific IDs
 	df = df[df["Prolific ID"].str.len() == 24]
 	# For any rows sharing both the same Prolific ID and the same Scenario, keep only the last occurrence.
@@ -96,7 +102,7 @@ def filter_invalid_rows(df):
 	df["Reliance category"] = df.apply(label_reliance, axis=1)
 	df = df.drop_duplicates(subset=["Prolific ID", "Scenario"], keep="last")
 	# Keep only those IDs that appear in 4 scenarios
-	df = df[df.groupby("Prolific ID")["Scenario"].transform("nunique").eq(4)]
+	# df = df[df.groupby("Prolific ID")["Scenario"].transform("nunique").eq(4)]
 	return df
 
 def analyse(df, min_seconds=0, keep_only_who_changed_mind=True, do_balance_treatments=False, filter_by_minimum_effort=False, expected_answer=None):
@@ -240,7 +246,7 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 
 	x = np.arange(len(scenarios))
 	width = 0.3
-	fig, axes = plt.subplots(1, 3, figsize=(10, 4), sharey=True)
+	fig, axes = plt.subplots(1, 3, figsize=(5*2.5, 4), sharey=True)
 
 	expl_colors = {False: 'C0', True: 'C1'}
 	score_map = {"Under-reliance": 0, "Appropriate accept": 1, "Appropriate reject": 1, "Over-reliance": 0}

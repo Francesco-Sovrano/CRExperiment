@@ -6,7 +6,12 @@ from pathlib import Path
 import re
 import tempfile
 import zipfile
+from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
+
+extra_data_folders = {
+	'2_bis': (2, 'experiment_results/scenario_2_bis'),
+}
 
 questionnaire_labels_map = {
 	"prolific_id": "Prolific ID",
@@ -42,7 +47,7 @@ scenario_labels_map = {
 }
 
 
-def parse_timestamp(ts: str) -> dt.datetime:
+def parse_timestamp(ts):
 	"""
 	Parse timestamp like '2025-07-26 17:21:43.548237'
 	"""
@@ -50,7 +55,7 @@ def parse_timestamp(ts: str) -> dt.datetime:
 	return dt.datetime.fromisoformat(ts)
 
 
-def read_log_records(path: Path) -> List[Tuple[dt.datetime, str, str]]:
+def read_log_records(path):
 	"""
 	Read a .log file into a list of (timestamp, key, value).
 	Each line has format: <timestamp>;<key>;<value>
@@ -228,7 +233,7 @@ def write_merged_csv(rows, out_path, preferred_order_map):
 			writer.writerow({v: r.get(k,'') for k,v in preferred_order_map.items()})
 
 
-def gather_log_files(input_path: Path) -> List[Path]:
+def gather_log_files(input_path):
 	"""
 	Return a list of .log file paths.
 	If input_path is a zip, extract it to a temp dir and return .log files within.
@@ -239,33 +244,18 @@ def gather_log_files(input_path: Path) -> List[Path]:
 		tempdir = Path(tempfile.mkdtemp(prefix="magix_logs_"))
 		with zipfile.ZipFile(input_path, "r") as z:
 			z.extractall(tempdir)
-		for p in tempdir.rglob("*.log"):
+		for p in tempdir.glob("*.log"):
 			log_paths.append(p)
 		return log_paths
 
 	if input_path.is_dir():
-		for p in input_path.rglob("*.log"):
+		for p in input_path.glob("*.log"):
 			log_paths.append(p)
 	return log_paths
 
-
-def main():
-	parser = argparse.ArgumentParser(description="Parse MAGIX logs and produce merged CSV tables.")
-	parser.add_argument("--input", required=True, help="Directory containing .log files, or a .zip of them.")
-	parser.add_argument("--output", required=True, help="Directory to write CSV outputs.")
-	args = parser.parse_args()
-
-	input_path = Path(args.input)
-	output_dir = Path(args.output)
-	output_dir.mkdir(parents=True, exist_ok=True)
-
-	log_files = gather_log_files(input_path)
-	if not log_files:
-		print("No .log files found.")
-		return
-
-	questionnaire_rows: List[Dict[str, object]] = []
-	scenarios_rows: Dict[int, List[Dict[str, object]]] = {1: [], 2: [], 3: [], 4: []}
+def get_scenario_rows(log_files, special_task_label=None):
+	questionnaire_rows = []
+	scenarios_rows = defaultdict(list)
 
 	for path in sorted(log_files):
 		records = read_log_records(path)
@@ -290,7 +280,35 @@ def main():
 				continue
 			row = build_scenario_row(slice_rec, n, prolific_id_value)
 			if row:
+				if special_task_label:
+					row['task'] = row['task'].replace(f'task{n}', f'task{n}{special_task_label}')
 				scenarios_rows[n].append(row)
+	return questionnaire_rows, scenarios_rows
+
+def main():
+	parser = argparse.ArgumentParser(description="Parse MAGIX logs and produce merged CSV tables.")
+	parser.add_argument("--input", required=True, help="Directory containing .log files, or a .zip of them.")
+	parser.add_argument("--output", required=True, help="Directory to write CSV outputs.")
+	args = parser.parse_args()
+
+	input_path = Path(args.input)
+	output_dir = Path(args.output)
+	output_dir.mkdir(parents=True, exist_ok=True)
+
+	log_files = gather_log_files(input_path)
+	if not log_files:
+		print("No .log files found.")
+		return
+
+	questionnaire_rows, scenarios_rows = get_scenario_rows(log_files)
+	# Add extra experiments
+	for label,(n, extra_path) in extra_data_folders.items():
+		_questionnaire_rows, _scenarios_rows = get_scenario_rows(
+			gather_log_files(Path(extra_path)), 
+			special_task_label=label.split('_')[-1]
+		)
+		scenarios_rows[label] = _scenarios_rows[n]
+		questionnaire_rows += _questionnaire_rows
 
 	# Write outputs
 	write_merged_csv(
@@ -298,19 +316,15 @@ def main():
 		output_dir / "questionnaire.csv",
 		preferred_order_map=questionnaire_labels_map,
 	)
+	print(f"Wrote: {output_dir / 'questionnaire.csv'}")
 
-	for n in (1, 2, 3, 4):
+	for n,v in scenarios_rows.items():
 		write_merged_csv(
-			scenarios_rows[n],
+			v,
 			output_dir / f"scenario_{n}.csv",
 			preferred_order_map=scenario_labels_map,
 		)
-
-	print(f"Wrote: {output_dir / 'questionnaire.csv'}")
-	print(f"Wrote: {output_dir / 'scenario_1.csv'}")
-	print(f"Wrote: {output_dir / 'scenario_2.csv'}")
-	print(f"Wrote: {output_dir / 'scenario_3.csv'}")
-	print(f"Wrote: {output_dir / 'scenario_4.csv'}")
+		print(f"Wrote: {output_dir / f'scenario_{n}.csv'}")
 
 
 if __name__ == "__main__":
