@@ -1324,10 +1324,10 @@ def main():
 	raw_df = load_frames(args.input)
 	raw_df = filter_invalid_rows(raw_df)
 
-	if args.min_seconds is None:
-		args.min_seconds = 30 # 30 seconds
-		# args.min_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.01).clip(upper=30).astype(int).to_dict()
-		# print("Min seconds (1st percentile) per scenario:\n", args.min_seconds)
+	# if args.min_seconds is None:
+	# 	args.min_seconds = 30 # 30 seconds
+	# 	# args.min_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.01).clip(upper=30).astype(int).to_dict()
+	# 	# print("Min seconds (1st percentile) per scenario:\n", args.min_seconds)
 
 	if args.max_seconds is None:
 		args.max_seconds = 360 # 6 minutes
