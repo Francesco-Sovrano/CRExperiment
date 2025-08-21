@@ -296,12 +296,13 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 				for i, v in enumerate(vals):
 					if v > 0.02:
 						c = int(count_pivot.loc[scenarios[i], cat])
-						ax.annotate(
-							f"{int(round(v*100)):.0f}%\n({c})",
-							(x[i] + (idx - 0.5)*width, bottom[i] + v/2),
-							xytext=(0, 3), textcoords='offset points', ha='center', va='bottom', fontsize=7,
-							bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='none', alpha=0.9)
-						)
+						if c > 1:
+							ax.annotate(
+								f"{int(round(v*100)):.0f}%\n({c})",
+								(x[i] + (idx - 0.5)*width, bottom[i] + (v/2 if v > 0.05 else 0)),
+								xytext=(0, 3), textcoords='offset points', ha='center', va='bottom', fontsize=7,
+								bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='none', alpha=0.9)
+							)
 				bottom += vals
 		# p-value annotation via Mann–Whitney U
 		p_vals = {}
@@ -450,49 +451,56 @@ def plot_corrections(df, output_dir, min_seconds=None, max_seconds=None):
 	plt.savefig(os.path.join(output_dir, f"corrections_by_scenario-s={min_seconds}_{max_seconds}.pdf"))
 	plt.show()
 
-def plot_mitigation_by_ease(df, out_dir, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False):
-	"""
-	Plot how 'How easy was it to understand the explanation?' relates to
-	over- and under-reliance mitigation, split by MAGIX vs non-MAGIX,
-	with statistical tests showing p-values for each ease level.
-
-	Definitions:
-	- Over-reliance mitigation rate (Expected=Reject):
-	  Appropriate reject / (Appropriate reject + Over-reliance)
-	- Under-reliance mitigation rate (Expected=Accept):
-	  Appropriate accept / (Appropriate accept + Under-reliance)
-	"""
+def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False):
 	d = df.copy()
-	# Time filter only; keep full range of 'ease' values
+
+	# Time filter only; keep full range of driver values
 	d = d[d.apply(lambda x: within_quantiles(x, min_seconds, max_seconds), axis=1)]
-	
-	ease_col = "How easy was it to understand the explanation?"
-	d = d[pd.notna(d[ease_col])]
-	d["Ease"] = d[ease_col].astype(int) + 1
 
 	# Ensure reliance labels exist
 	if "Reliance category" not in d.columns:
 		d["Reliance category"] = d.apply(label_reliance, axis=1)
 
-	# Filter for valid explanation feedback
+	# Filtering consistent with your original logic
 	if filter_by_minimum_effort:
-		d = d[(d['How much effort did it take to understand and complete this task?'] >= 1)] # Keep only who put some effort
-	d = d[(d["Did the explanation help you evaluate the AI's output?"] >= 1)] # Keep only who said was helped by the explanation
-	d = d[(d["How useful was the explanation provided?"] >= 1)] # Keep only who used the explanation
-	if keep_only_who_changed_mind: # Keep only who actually used the explanations, updating their mental model
+		d = d[(d['How much effort did it take to understand and complete this task?'] >= 1)]
+	d = d[(d["Did the explanation help you evaluate the AI's output?"] >= 1)]
+	d = d[(d["How useful was the explanation provided?"] >= 1)]
+
+	if keep_only_who_changed_mind:
 		d = d[
-			# (d["How useful was the explanation provided?"] >= 1)
 			(
-				(d["How confident are you in the decision you made? (without explanation)"] != d["How confident are you in the decision you made? (with explanation)"])
-				| (d["Explanation changed mind"] == True)
+				d["How confident are you in the decision you made? (without explanation)"]
+				!= d["How confident are you in the decision you made? (with explanation)"]
 			)
+			| (d["Explanation changed mind"] == True)
 		]
 
+	# ---------------------------
+	# Drivers to plot (column, pretty x-label, stub)
+	# ---------------------------
+	drivers = [
+		("How easy was it to understand the explanation?", "Expl. Clarity", "Ease"),
+		("How confident are you in the decision you made? (with explanation)", "Confidence after Expl.", "Confidence_after"),
+		# ("How confident are you in the decision you made? (without explanation)", "Confidence before Expl.", "Confidence_before"),
+		("Did the explanation help you evaluate the AI's output?", "Expl. Helpfulness", "Helpfulness"),
+		# ("How useful was the explanation provided?", "Expl. Usefulness", "Usefulness"),
+		# ("How much effort did it take to understand and complete this task?", "Effort", "Effort"),
+	]
+
+	# Coerce any Likert-like column to 1–5 integers; if it's 0–4 shift to 1–5
+	def to_one_to_five(series):
+		s = pd.to_numeric(series, errors="coerce")
+		return (s + 1).round().astype("Int64")
+
+	# Helper: compute mitigation tables/rates
 	def mitigation_series(data, expected, appropriate_label, error_label):
 		sub = data[data["Expected answer"] == expected]
-		tab = (sub.groupby(["Explanation is MAGIX-defined", "Ease", "Reliance category"])   
-				   .size()
-				   .unstack(fill_value=0))
+		tab = (
+			sub.groupby(["Explanation is MAGIX-defined", "Scale", "Reliance category"])
+			   .size()
+			   .unstack(fill_value=0)
+		)
 		for col in (appropriate_label, error_label):
 			if col not in tab.columns:
 				tab[col] = 0
@@ -500,97 +508,148 @@ def plot_mitigation_by_ease(df, out_dir, min_seconds=None, max_seconds=None, kee
 		rate = (tab[appropriate_label] / den).replace([np.inf, np.nan], np.nan)
 		return rate, tab  # also return counts
 
-	# Build rates and counts
-	over_rate, over_counts = mitigation_series(
-		d, expected="Reject",
-		appropriate_label="Appropriate reject",
-		error_label="Over-reliance"
+	# Keep only drivers that actually have data
+	valid_drivers = []
+	for col, x_label, stub in drivers:
+		if col in d.columns and d[col].notna().any():
+			valid_drivers.append((col, x_label, stub))
+	if not valid_drivers:
+		raise ValueError("None of the specified driver columns contain data to plot.")
+
+	ncols = len(valid_drivers)
+	fig, axes = plt.subplots(nrows=2, ncols=ncols, figsize=(3.2 * ncols, 3.7), sharex=True, sharey=True)
+	axes = np.atleast_2d(axes)
+
+	for c, (col, x_label, stub) in enumerate(valid_drivers):
+		d_sub = d[pd.notna(d[col])].copy()
+		d_sub["Scale"] = to_one_to_five(d_sub[col])
+		d_sub = d_sub[pd.notna(d_sub["Scale"])]
+
+		# Build rates and counts
+		over_rate, over_counts = mitigation_series(
+			d_sub, expected="Reject",
+			appropriate_label="Appropriate reject",
+			error_label="Over-reliance"
+		)
+		under_rate, under_counts = mitigation_series(
+			d_sub, expected="Accept",
+			appropriate_label="Appropriate accept",
+			error_label="Under-reliance"
+		)
+
+		levels = sorted([int(v) for v in d_sub["Scale"].dropna().unique()])
+		panels = [
+			(axes[0, c], over_rate, over_counts, "Appropriate reject", "Over-reliance"),
+			(axes[1, c], under_rate, under_counts, "Appropriate accept", "Under-reliance"),
+		]
+
+		for ax, rate, counts, appr_label, err_label in panels:
+			# Compute per-level p-values
+			p_values = {}
+			for e in levels:
+				try:
+					cnt0 = counts.loc[(False, e)][appr_label]
+					tot0 = counts.loc[(False, e)][appr_label] + counts.loc[(False, e)][err_label]
+				except KeyError:
+					cnt0, tot0 = 0, 0
+				try:
+					cnt1 = counts.loc[(True, e)][appr_label]
+					tot1 = counts.loc[(True, e)][appr_label] + counts.loc[(True, e)][err_label]
+				except KeyError:
+					cnt1, tot1 = 0, 0
+				if tot0 > 0 and tot1 > 0:
+					_, pval = proportions_ztest([cnt0, cnt1], [tot0, tot1])
+					effect = sms.proportion_effectsize(cnt1 / tot1, cnt0 / tot0)
+				else:
+					pval = np.nan
+					effect = np.nan
+				p_values[e] = (pval, effect)
+
+			# Plot lines and annotate counts and p-values
+			y_values = {}
+			# Keep track of previous annotation positions at each x
+			annot_positions = {}
+			for magix_flag, label, marker in [(False, "Non-MAGIX", "o"), (True, "MAGIX", "s")]:
+				series = rate.loc[magix_flag] if (magix_flag in rate.index.get_level_values(0)) else pd.Series(dtype=float)
+				y = [series.get(e, np.nan) for e in levels]
+				y_values[magix_flag] = y
+				ln, = ax.plot(levels, y, marker=marker, label=label)
+				
+				# N annotations
+				for idx, e in enumerate(levels):
+					N = 0
+					if (magix_flag, e) in counts.index:
+						N = int(counts.loc[(magix_flag, e)][appr_label] + counts.loc[(magix_flag, e)][err_label])
+					yv = y[idx]
+					if np.isfinite(yv):
+						# Default offset
+						y_offset = 4
+
+						# If we already annotated something close at this x, move it higher
+						if e in annot_positions:
+							if 0 <= yv - annot_positions[e] < 0.05:
+								y_offset += 10   # push higher if overlap
+							elif -0.05 < yv - annot_positions[e] < 0:
+								y_offset -= 10   # push higher if overlap
+
+						# Store position
+						annot_positions[e] = yv
+
+						ax.annotate(
+							f"N={N}", (e, yv), xytext=(0, y_offset), textcoords="offset points",
+							ha="center", va="bottom", fontsize=7,
+							color=ln.get_color(),   # match line color
+							bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.9)
+						)
+
+			# P-value annotations
+			for e in levels:
+				pval, effect = p_values.get(e, (np.nan, np.nan))
+				if np.isfinite(pval) and pval < 0.05:
+					y0 = y_values.get(False, [np.nan] * len(levels))[levels.index(e)]
+					y1 = y_values.get(True,  [np.nan] * len(levels))[levels.index(e)]
+					y_max = max([yv for yv in (y0, y1) if np.isfinite(yv)] + [0])
+					weight = 'bold' if pval < 0.05 else 'normal'
+					ax.annotate(
+						f"p={pval:.3f}\n(h={effect:.2f})", (e, y_max + 0.01),
+						xytext=(0, 12), textcoords="offset points",
+						ha="center", va="bottom", fontsize=8, fontweight=weight,
+						bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.9)
+					)
+
+			ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+			# ax.set_ylim(0, 1.1)
+			ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+		# Only bottom row shows x-axis labels
+		# axes[0, c].set_xlabel(x_label)
+		axes[1, c].set_xlabel(x_label)
+
+		# Only left column shows y-axis label
+		if c == 0:
+			axes[0, 0].set_ylabel("Over-reliance\nMitigation Rate", rotation=90)
+			axes[1, 0].set_ylabel("Under-reliance\nMitigation Rate", rotation=90)
+
+	# One shared legend (top-right outside the grid)
+	axes[-1,-1].legend(
+		title="Explanation type",
+		loc='lower right',
+		frameon=True,
+		fontsize=8,          # legend labels
+		title_fontsize=9     # legend title
 	)
-	under_rate, under_counts = mitigation_series(
-		d, expected="Accept",
-		appropriate_label="Appropriate accept",
-		error_label="Under-reliance"
-	)
 
-	eases = sorted(d["Ease"].unique())
-	fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
-	titles = ["Over-reliance mitigation (Expected = Reject)",
-			  "Under-reliance mitigation (Expected = Accept)"]
-	rates_counts = [(over_rate, over_counts, "Appropriate reject", "Over-reliance"),
-					(under_rate, under_counts, "Appropriate accept", "Under-reliance")]
-
-	for ax, title, (rate, counts, appr_label, err_label) in zip(axes, titles, rates_counts):
-		# Compute p-values for each ease level
-		p_values = {}
-		for e in eases:
-			try:
-				cnt0 = counts.loc[(False, e)][appr_label]
-				tot0 = counts.loc[(False, e)][appr_label] + counts.loc[(False, e)][err_label]
-			except KeyError:
-				cnt0, tot0 = 0, 0
-			try:
-				cnt1 = counts.loc[(True, e)][appr_label]
-				tot1 = counts.loc[(True, e)][appr_label] + counts.loc[(True, e)][err_label]
-			except KeyError:
-				cnt1, tot1 = 0, 0
-			if tot0 > 0 and tot1 > 0:
-				_, pval = proportions_ztest([cnt0, cnt1], [tot0, tot1])
-				effect = sms.proportion_effectsize(cnt1/tot1, cnt0/tot0)
-			else:
-				pval = np.nan
-				effect = np.nan
-			p_values[e] = (pval, effect)
-
-		# Plot lines and annotate counts and p-values
-		y_values = {}
-		for magix_flag, label, marker in [(False, "Non-MAGIX", "o"), (True, "MAGIX", "s")]:
-			series = rate.loc[magix_flag] if (magix_flag in rate.index.get_level_values(0)) else pd.Series(dtype=float)
-			y = [series.get(e, np.nan) for e in eases]
-			y_values[magix_flag] = y
-			ax.plot(eases, y, marker=marker, label=label)
-			# N annotations (slightly lower offset)
-			for idx, e in enumerate(eases):
-				N = 0
-				if (magix_flag, e) in counts.index:
-					N = int(counts.loc[(magix_flag, e)][appr_label] + counts.loc[(magix_flag, e)][err_label])
-				yv = y[idx]
-				if np.isfinite(yv):
-					ax.annotate(f"N={N}", (e, yv), xytext=(0, 4), textcoords="offset points",
-								ha="center", va="bottom", fontsize=7, bbox=dict(
-						boxstyle="round,pad=0.2",
-						facecolor="white",
-						edgecolor="none",
-						alpha=0.9
-					))
-
-		# P-value annotations higher and bold when <0.05
-		for e in eases:
-			pval, effect = p_values.get(e, np.nan)
-			if np.isfinite(pval):
-				y0 = y_values.get(False)[eases.index(e)]
-				y1 = y_values.get(True)[eases.index(e)]
-				y_max = max([yv for yv in (y0, y1) if np.isfinite(yv)] + [0])
-				weight = 'bold' if pval < 0.05 else 'normal'
-				ax.annotate(f"p={pval:.3f}\n(h={effect:.2f})", (e, y_max+0.01), xytext=(0, 12), textcoords="offset points",
-							ha="center", va="bottom", fontsize=8, fontweight=weight, bbox=dict(
-						boxstyle="round,pad=0.2",
-						facecolor="white",
-						edgecolor="none",
-						alpha=0.9
-					))
-
-		ax.set_title(title, fontsize=12)
-		ax.set_xlabel("Ease of understanding (1–5)")
-		ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-		ax.set_ylim(0, 1.1)
-		ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-
-	axes[0].set_ylabel("Mitigation rate")
-	axes[0].legend(title="Explanation type", frameon=True)
-	plt.tight_layout()
+	plt.tight_layout()  # leave room for the legend
 	os.makedirs(out_dir, exist_ok=True)
-	plt.savefig(os.path.join(out_dir, f"mitigation_by_ease-s={min_seconds}_{max_seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
+	fname = (
+		f"mitigation_by_ALL_DRIVERS-s={min_seconds}_{max_seconds}"
+		f"{'-effort' if filter_by_minimum_effort else ''}"
+		f"{'-balanced' if do_balance_treatments else ''}"
+		f"{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"
+	)
+	plt.savefig(os.path.join(out_dir, fname), bbox_inches='tight')
 	plt.show()
+	plt.close(fig)
 
 def plot_reliance_vs_trust_attitude_effort(df, out_dir, min_seconds=None, max_seconds=None, annotate_n=True, show_stats=True, per_cell_w=3, per_cell_h=3, base_font=8):
 	questions = {
@@ -1265,12 +1324,14 @@ def main():
 	raw_df = load_frames(args.input)
 	raw_df = filter_invalid_rows(raw_df)
 
-	# if args.min_seconds is None:
-	# 	args.min_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.01).clip(upper=30).astype(int).to_dict()
-	# 	print("Min seconds (1st percentile) per scenario:\n", args.min_seconds)
+	if args.min_seconds is None:
+		args.min_seconds = 30 # 30 seconds
+		# args.min_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.01).clip(upper=30).astype(int).to_dict()
+		# print("Min seconds (1st percentile) per scenario:\n", args.min_seconds)
 
 	if args.max_seconds is None:
-		args.max_seconds = 360 #raw_df.groupby("Scenario")["Seconds"].quantile(0.99).clip(lower=300).astype(int).to_dict()
+		args.max_seconds = 360 # 6 minutes
+		# args.max_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.99).clip(lower=300).astype(int).to_dict()
 		# print("Max seconds (99th percentile) per scenario:\n", args.max_seconds)
 
 	visualize_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
@@ -1285,7 +1346,7 @@ def main():
 	df, counts = analyse(raw_df, min_seconds=args.min_seconds, max_seconds=args.max_seconds, keep_only_who_changed_mind=args.keep_only_who_changed_mind, do_balance_treatments=args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
 	visualize_distribution(df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
 	# plot_reliance_vs_trust_attitude_effort_by_scenario(df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
-	plot_mitigation_by_ease(raw_df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
+	plot_mitigation_by_driver(raw_df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
 	plot_per_scenario_multi(df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
 	# plot_changes(df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
 	# plot_reliance_counts(counts, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
