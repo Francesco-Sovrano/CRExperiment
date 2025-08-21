@@ -96,21 +96,35 @@ def tidy_task(val):
 def filter_invalid_rows(df):
 	df = df.copy()
 	# Keep only valid Prolific IDs
-	df = df[df["Prolific ID"].str.len() == 24]
+	df = df[df["Prolific ID"].str.len() >= 23]
 	# For any rows sharing both the same Prolific ID and the same Scenario, keep only the last occurrence.
 	df["Scenario"] = df["Task file"].apply(tidy_task)
+	df = df[df["Scenario"] != "Scenario 2"]
 	df["Reliance category"] = df.apply(label_reliance, axis=1)
 	df = df.drop_duplicates(subset=["Prolific ID", "Scenario"], keep="last")
 	# # Keep only those IDs that appear in 4 scenarios
 	# df = df[df.groupby("Prolific ID")["Scenario"].transform("nunique").eq(4)]
 	return df
 
-def analyse(df, min_seconds=0, keep_only_who_changed_mind=True, do_balance_treatments=False, filter_by_minimum_effort=False, expected_answer=None):
+# Apply filtering row-by-row
+def within_quantiles(row, min_seconds_per_scenario=None, max_seconds_per_scenario=None):
+	scenario = row["Scenario"]
+	seconds = row["Seconds"]
+	min_sec = min_seconds_per_scenario.get(scenario, None) if isinstance(min_seconds_per_scenario, dict) else min_seconds_per_scenario
+	max_sec = max_seconds_per_scenario.get(scenario, None) if isinstance(max_seconds_per_scenario, dict) else max_seconds_per_scenario
+	if not min_seconds_per_scenario:
+		min_sec = float('-inf')
+	if not max_seconds_per_scenario:
+		max_sec = float('inf')
+	return min_sec <= seconds <= max_sec
+
+def analyse(df, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=True, do_balance_treatments=False, filter_by_minimum_effort=False, expected_answer=None):
 	df = df.copy()
 	# Keep only who spent enough time
+	
 	old_len = len(df)
-	df = df[df["Seconds"] >= min_seconds]
-	print(f'{old_len-len(df)} entries were removed because produce in less than {min_seconds} seconds')
+	df = df[df.apply(lambda x: within_quantiles(x, min_seconds, max_seconds), axis=1)]
+	print(f'{old_len-len(df)} entries were removed because produced in LESS than {min_seconds} and MORE than {max_seconds}')
 	if expected_answer:
 		df = df[df["Expected answer"] == expected_answer]
 
@@ -120,7 +134,12 @@ def analyse(df, min_seconds=0, keep_only_who_changed_mind=True, do_balance_treat
 	if filter_by_minimum_effort: # Keep only who put some effort
 		df = df[(df['How much effort did it take to understand and complete this task?'] >= 1)]
 	df = df[(df["How easy was it to understand the explanation?"] >= 3)] # Keep only who understood the explanation
+	# df = df[(
+	# 	(df["How confident are you in the decision you made? (without explanation)"] >= 1) 
+	# 	| (df["How confident are you in the decision you made? (with explanation)"] >= 1)
+	# )]
 	df = df[(df["Did the explanation help you evaluate the AI's output?"] >= 1)] # Keep only who said was helped by the explanation
+	# df = df[(df["How useful was the explanation provided?"] >= 1)] # Keep only who used the explanation		
 	if keep_only_who_changed_mind: # Keep only who actually used the explanations, updating their mental model
 		df = df[
 			# (df["How useful was the explanation provided?"] >= 1)
@@ -142,7 +161,7 @@ def analyse(df, min_seconds=0, keep_only_who_changed_mind=True, do_balance_treat
 				.size().unstack(fill_value=0)
 				.reindex(RELIANCE_ORDER, axis=1).sort_index(axis=0))
 	chi2, p, dof, _ = chi2_contingency(counts.values)
-	print(f"Overall χ²={chi2:.3f}, dof={dof}, p={p:.4f}  (Seconds ≥ {min_seconds})")
+	print(f"Overall χ²={chi2:.3f}, dof={dof}, p={p:.4f}  ({max_seconds} ≥ Seconds ≥ {min_seconds})")
 	return df, counts
 
 def fmt(x, digits=2):
@@ -152,7 +171,7 @@ def star(p):
 	if pd.isna(p): return ''
 	return '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else ''
 
-def plot_reliance_counts(counts, out_dir, seconds=0, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False):
+def plot_reliance_counts(counts, out_dir, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False):
 	ax = counts.plot(kind="bar", figsize=(9,5))
 	ax.set_title("Reliance counts by explanation type")
 	ax.set_ylabel("Number of judgements")
@@ -165,10 +184,10 @@ def plot_reliance_counts(counts, out_dir, seconds=0, keep_only_who_changed_mind=
 	annotate_bars(ax, fmt="{:.0f}")
 	leg = ax.legend(title="Reliance category", ncols=3, frameon=True)
 	plt.tight_layout()
-	plt.savefig(os.path.join(out_dir, f"reliance_counts-s={seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
+	plt.savefig(os.path.join(out_dir, f"reliance_counts-s={min_seconds}_{max_seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
 	plt.show()
 
-def plot_reliance_proportions(counts, out_dir, seconds=0, keep_only_who_changed_mind=True, do_balance_treatments=False, filter_by_minimum_effort=False):
+def plot_reliance_proportions(counts, out_dir, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=True, do_balance_treatments=False, filter_by_minimum_effort=False):
 	props = counts.div(counts.sum(axis=1), axis=0)
 	ax = props.plot(kind="bar", figsize=(9,5))
 	ax.set_title("Reliance proportions by explanation type")
@@ -182,10 +201,10 @@ def plot_reliance_proportions(counts, out_dir, seconds=0, keep_only_who_changed_
 	annotate_bars(ax, fmt="{:.0f}%", y_is_pct=True)
 	ax.legend(title="Reliance category", ncols=3, frameon=True)
 	plt.tight_layout()
-	plt.savefig(os.path.join(out_dir, f"reliance_props-s={seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
+	plt.savefig(os.path.join(out_dir, f"reliance_props-s={min_seconds}_{max_seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
 	plt.show()
 
-def plot_changes(df, out_dir, seconds=0, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False):
+def plot_changes(df, out_dir, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False):
 	df = df.copy()
 	df["Change type"] = df.apply(
 		lambda r: f"{r['Response before explanation']}→{r['Response after explanation']}" if r["Explanation changed mind"] else "No change",
@@ -208,10 +227,10 @@ def plot_changes(df, out_dir, seconds=0, keep_only_who_changed_mind=False, do_ba
 	annotate_bars(ax, fmt="{:.0f}")
 	ax.legend(title="Change type", ncols=3, frameon=True)
 	plt.tight_layout()
-	plt.savefig(os.path.join(out_dir, f"response_changes-s={seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
+	plt.savefig(os.path.join(out_dir, f"response_changes-s={min_seconds}_{max_seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
 	plt.show()
 
-def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False):
+def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False):
 	"""
 	Create a 1x3 subplot figure showing per-scenario reliance composition for:
 	- All experiments (expected_answer=None)
@@ -223,7 +242,8 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 	results = []
 	for label, expected in [("All", None), ("Accept", "Accept"), ("Reject", "Reject")]:
 		df_sub, counts = analyse(df, 
-			min_seconds=min_seconds, 
+			min_seconds=min_seconds,
+			max_seconds=max_seconds, 
 			keep_only_who_changed_mind=keep_only_who_changed_mind, 
 			do_balance_treatments=do_balance_treatments, 
 			filter_by_minimum_effort=filter_by_minimum_effort,
@@ -277,7 +297,7 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 					if v > 0.02:
 						c = int(count_pivot.loc[scenarios[i], cat])
 						ax.annotate(
-							f"{c}({int(round(v*100)):.0f}%)",
+							f"{int(round(v*100)):.0f}%\n({c})",
 							(x[i] + (idx - 0.5)*width, bottom[i] + v/2),
 							xytext=(0, 3), textcoords='offset points', ha='center', va='bottom', fontsize=7,
 							bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='none', alpha=0.9)
@@ -362,13 +382,15 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=0, keep_only_who_changed_mi
 	)
 
 	plt.tight_layout(rect=[0, 0, 1, 0.9])
-	plt.savefig(os.path.join(out_dir, f"per_scenario_reliance_props_multi-s={min_seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
+	plt.savefig(os.path.join(out_dir, f"per_scenario_reliance_props_multi-s={min_seconds}_{max_seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
 	plt.show()
 
-def plot_corrections(df, output_dir, seconds):
+def plot_corrections(df, output_dir, min_seconds=None, max_seconds=None):
 	df = df.copy()
 	# Time filter only; keep full range of 'ease' values
-	df = df[df["Seconds"] >= seconds]
+	# df = df[df["Seconds"] >= seconds]
+
+	df = df[df.apply(lambda x: within_quantiles(x, min_seconds, max_seconds), axis=1)]
 	# # Ensure reliance labels exist
 	# if "Reliance category" not in df.columns:
 	# 	df["Reliance category"] = df.apply(label_reliance, axis=1)
@@ -425,10 +447,10 @@ def plot_corrections(df, output_dir, seconds):
 								ha="center", va="bottom", fontsize=9)
 	fig.tight_layout()
 	# save to output directory
-	plt.savefig(os.path.join(output_dir, f"corrections_by_scenario-s={seconds}.pdf"))
+	plt.savefig(os.path.join(output_dir, f"corrections_by_scenario-s={min_seconds}_{max_seconds}.pdf"))
 	plt.show()
 
-def plot_mitigation_by_ease(df, out_dir, seconds=0, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False):
+def plot_mitigation_by_ease(df, out_dir, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False):
 	"""
 	Plot how 'How easy was it to understand the explanation?' relates to
 	over- and under-reliance mitigation, split by MAGIX vs non-MAGIX,
@@ -442,7 +464,8 @@ def plot_mitigation_by_ease(df, out_dir, seconds=0, keep_only_who_changed_mind=F
 	"""
 	d = df.copy()
 	# Time filter only; keep full range of 'ease' values
-	d = d[d["Seconds"] >= seconds]
+	d = d[d.apply(lambda x: within_quantiles(x, min_seconds, max_seconds), axis=1)]
+	
 	ease_col = "How easy was it to understand the explanation?"
 	d = d[pd.notna(d[ease_col])]
 	d["Ease"] = d[ease_col].astype(int) + 1
@@ -455,6 +478,7 @@ def plot_mitigation_by_ease(df, out_dir, seconds=0, keep_only_who_changed_mind=F
 	if filter_by_minimum_effort:
 		d = d[(d['How much effort did it take to understand and complete this task?'] >= 1)] # Keep only who put some effort
 	d = d[(d["Did the explanation help you evaluate the AI's output?"] >= 1)] # Keep only who said was helped by the explanation
+	d = d[(d["How useful was the explanation provided?"] >= 1)] # Keep only who used the explanation
 	if keep_only_who_changed_mind: # Keep only who actually used the explanations, updating their mental model
 		d = d[
 			# (d["How useful was the explanation provided?"] >= 1)
@@ -565,10 +589,10 @@ def plot_mitigation_by_ease(df, out_dir, seconds=0, keep_only_who_changed_mind=F
 	axes[0].legend(title="Explanation type", frameon=True)
 	plt.tight_layout()
 	os.makedirs(out_dir, exist_ok=True)
-	plt.savefig(os.path.join(out_dir, f"mitigation_by_ease-s={seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
+	plt.savefig(os.path.join(out_dir, f"mitigation_by_ease-s={min_seconds}_{max_seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf"))
 	plt.show()
 
-def plot_reliance_vs_trust_attitude_effort(df, out_dir, seconds=0, annotate_n=True, show_stats=True, per_cell_w=3, per_cell_h=3, base_font=8):
+def plot_reliance_vs_trust_attitude_effort(df, out_dir, min_seconds=None, max_seconds=None, annotate_n=True, show_stats=True, per_cell_w=3, per_cell_h=3, base_font=8):
 	questions = {
 		'Effort': 'How much effort did it take to understand and complete this task?',
 		'Attitude': 'How would you rate your overall attitude toward Artificial Intelligence (AI)?',
@@ -577,8 +601,8 @@ def plot_reliance_vs_trust_attitude_effort(df, out_dir, seconds=0, annotate_n=Tr
 	q_keys = list(questions.keys())
 
 	d = df.copy()
-	d = d[d.get('Seconds', 0) >= seconds]
-
+	d = d[d.apply(lambda x: within_quantiles(x, min_seconds, max_seconds), axis=1)]
+	
 	if 'Reliance category' not in d.columns:
 		d['Reliance category'] = d.apply(label_reliance, axis=1)
 
@@ -716,12 +740,12 @@ def plot_reliance_vs_trust_attitude_effort(df, out_dir, seconds=0, annotate_n=Tr
 
 		fig.tight_layout(rect=(0, 0, 1, 0.92))
 		os.makedirs(out_dir, exist_ok=True)
-		out_path = os.path.join(out_dir, f"reliance_vs_trust_attitude_effort-s={seconds}.pdf")
+		out_path = os.path.join(out_dir, f"reliance_vs_trust_attitude_effort-s={min_seconds}_{max_seconds}.pdf")
 		plt.savefig(out_path, bbox_inches='tight')
 		plt.show()
 		print(f"Saved figure to: {out_path}")
 
-def plot_reliance_vs_trust_attitude_effort_by_scenario(df, out_dir, seconds=0, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False, annotate_n=True, show_stats=True, per_cell_w=3, per_cell_h=2.1, base_font=8):
+def plot_reliance_vs_trust_attitude_effort_by_scenario(df, out_dir, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False, annotate_n=True, show_stats=True, per_cell_w=3, per_cell_h=2.1, base_font=8):
 	def natural_key(s):
 		s = str(s)
 		return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
@@ -734,7 +758,7 @@ def plot_reliance_vs_trust_attitude_effort_by_scenario(df, out_dir, seconds=0, k
 	q_keys = list(questions.keys())
 
 	d = df.copy()
-	d = d[d.get('Seconds', 0) >= seconds]
+	d = d[d.apply(lambda x: within_quantiles(x, min_seconds, max_seconds), axis=1)]
 
 	if 'Reliance category' not in d.columns:
 		d['Reliance category'] = d.apply(label_reliance, axis=1)
@@ -904,17 +928,18 @@ def plot_reliance_vs_trust_attitude_effort_by_scenario(df, out_dir, seconds=0, k
 
 
 		os.makedirs(out_dir, exist_ok=True)
-		out_path = os.path.join(out_dir, f"reliance_vs_trust_attitude_effort_by_scenario-s={seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf")
+		out_path = os.path.join(out_dir, f"reliance_vs_trust_attitude_effort_by_scenario-s={min_seconds}_{max_seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf")
 		plt.savefig(out_path, bbox_inches='tight')
 		plt.show()
 		print(f"Saved figure to: {out_path}")
 
-def plot_effort_reliance_by_scenario(df, out_dir, seconds):
+def plot_effort_reliance_by_scenario(df, out_dir, min_seconds=None, max_seconds=None):
 	effort_col = "How much effort did it take to understand and complete this task?"
 	scenario_col = "Scenario"
+	d = df.copy()
 
-	# Prepare data
-	d = df[df["Seconds"] >= seconds].copy()
+	d = d[d.apply(lambda x: within_quantiles(x, min_seconds, max_seconds), axis=1)]
+
 	if "Reliance category" not in d.columns:
 		d["Reliance category"] = d.apply(label_reliance, axis=1)
 	d["Effort"] = pd.to_numeric(d[effort_col], errors="coerce")
@@ -1016,15 +1041,15 @@ def plot_effort_reliance_by_scenario(df, out_dir, seconds):
 	if first_stats_leg is not None:
 		first_ax.add_artist(first_stats_leg)
 
-	fig.suptitle(f"Effort vs Reliance across scenarios (seconds ≥ {seconds})", fontsize=18, y=1)
+	# fig.suptitle(f"Effort vs Reliance across scenarios ({max_seconds} ≥ seconds ≥ {min_seconds})", fontsize=18, y=1)
 	# plt.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.12, hspace=0.1, wspace=0.05)
 
-	out_path = os.path.join(out_dir, f"effort_reliance_comparison_by_scenario-s={seconds}.pdf")
+	out_path = os.path.join(out_dir, f"effort_reliance_comparison_by_scenario-s={min_seconds}_{max_seconds}.pdf")
 	plt.savefig(out_path, dpi=300, bbox_inches='tight')
 	plt.show()
 	print(f"Saved figure to: {out_path}")
 
-def plot_effort_distribution(df, out_dir, seconds, cmap_name='Set3'):
+def plot_effort_distribution(df, out_dir, min_seconds=None, max_seconds=None, cmap_name='Set3'):
 	"""
 	Improved boxplot of 'How much effort...' Likert responses by scenario,
 	using a light pastel colormap and readable annotation backgrounds.
@@ -1032,7 +1057,7 @@ def plot_effort_distribution(df, out_dir, seconds, cmap_name='Set3'):
 	# Filter and prepare data
 	effort_col = "How much effort did it take to understand and complete this task?"
 	d = df.copy()
-	d = d[d["Seconds"] >= seconds]
+	d = d[d.apply(lambda x: within_quantiles(x, min_seconds, max_seconds), axis=1)]
 	if "Reliance category" not in d.columns:
 		d["Reliance category"] = d.apply(label_reliance, axis=1)
 	d["Effort"] = pd.to_numeric(d[effort_col], errors="coerce") + 1
@@ -1102,12 +1127,12 @@ def plot_effort_distribution(df, out_dir, seconds, cmap_name='Set3'):
 	plt.tight_layout()
 
 	# Save and show
-	out_path = os.path.join(out_dir, f"effort_distribution-s={seconds}.pdf")
+	out_path = os.path.join(out_dir, f"effort_distribution-s={min_seconds}_{max_seconds}.pdf")
 	plt.savefig(out_path)
 	plt.show()
 	print(f"Saved improved effort distribution plot to {out_path}")
 
-def visualize_distribution(df, out_dir, seconds=0, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False, figsize=(8, 5)):
+def visualize_distribution(df, out_dir, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=False, do_balance_treatments=False, filter_by_minimum_effort=False, figsize=(8, 5)):
 	"""
 	Compute and plot the distribution of participants across:
 	  - Scenario
@@ -1130,7 +1155,7 @@ def visualize_distribution(df, out_dir, seconds=0, keep_only_who_changed_mind=Fa
 	"""
 	# 0) Filter and copy
 	df = df.copy()
-	df = df[df.get('Seconds', 0) >= seconds]
+	df = df[df.apply(lambda x: within_quantiles(x, min_seconds, max_seconds), axis=1)]
 
 	# 1) Map Expected answer to AI correctness labels
 	df['AI correctness'] = df['Expected answer'].map({
@@ -1192,7 +1217,7 @@ def visualize_distribution(df, out_dir, seconds=0, keep_only_who_changed_mind=Fa
 	plt.tight_layout()
 
 	# 8) Save and show
-	out_path = os.path.join(out_dir, f"participants_distribution-s={seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf")
+	out_path = os.path.join(out_dir, f"participants_distribution-s={min_seconds}_{max_seconds}{'-effort' if filter_by_minimum_effort else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_mind' if keep_only_who_changed_mind else ''}.pdf")
 	plt.savefig(out_path)
 	plt.show()
 
@@ -1228,7 +1253,8 @@ def main():
 	parser = argparse.ArgumentParser(description="Analyse reliance patterns in scenario CSVs.")
 	parser.add_argument("--input", required=True, help="Directory containing scenario_*.csv files, or a .zip of them.")
 	parser.add_argument("--output", required=True, help="Directory to write results.")
-	parser.add_argument("--min-seconds", type=int, default=10, help="Minimum 'Seconds' to include (default: 120).")
+	parser.add_argument("--min-seconds", type=int, default=None, help="Minimum 'Seconds' to include (default: 1% quantile).")
+	parser.add_argument("--max-seconds", type=int, default=None, help="Maximum 'Seconds' to include (default: 99% quantile).")
 	parser.add_argument("--keep_only_who_changed_mind", action="store_true")
 	parser.add_argument("--balance_treatments", action="store_true")
 	parser.add_argument("--filter_by_minimum_effort", action="store_true")
@@ -1238,23 +1264,32 @@ def main():
 
 	raw_df = load_frames(args.input)
 	raw_df = filter_invalid_rows(raw_df)
-	visualize_distribution(raw_df, args.output, args.min_seconds)
+
+	# if args.min_seconds is None:
+	# 	args.min_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.01).clip(upper=30).astype(int).to_dict()
+	# 	print("Min seconds (1st percentile) per scenario:\n", args.min_seconds)
+
+	if args.max_seconds is None:
+		args.max_seconds = 360 #raw_df.groupby("Scenario")["Seconds"].quantile(0.99).clip(lower=300).astype(int).to_dict()
+		# print("Max seconds (99th percentile) per scenario:\n", args.max_seconds)
+
+	visualize_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
 	# plot_per_scenario_multi(raw_df, args.output)
 
-	plot_effort_distribution(raw_df, args.output, args.min_seconds)
-	plot_reliance_vs_trust_attitude_effort(raw_df, args.output, args.min_seconds)
-	plot_reliance_vs_trust_attitude_effort_by_scenario(raw_df, args.output, args.min_seconds)
-	plot_effort_reliance_by_scenario(raw_df, args.output, args.min_seconds)
-	plot_corrections(raw_df, args.output, args.min_seconds)
+	plot_effort_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
+	plot_reliance_vs_trust_attitude_effort(raw_df, args.output, args.min_seconds, args.max_seconds)
+	plot_reliance_vs_trust_attitude_effort_by_scenario(raw_df, args.output, args.min_seconds, args.max_seconds)
+	plot_effort_reliance_by_scenario(raw_df, args.output, args.min_seconds, args.max_seconds)
+	plot_corrections(raw_df, args.output, args.min_seconds, args.max_seconds)
 
-	df, counts = analyse(raw_df, min_seconds=args.min_seconds, keep_only_who_changed_mind=args.keep_only_who_changed_mind, do_balance_treatments=args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
-	visualize_distribution(df, args.output, args.min_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
-	# plot_reliance_vs_trust_attitude_effort_by_scenario(df, args.output, args.min_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
-	plot_mitigation_by_ease(raw_df, args.output, args.min_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
-	plot_per_scenario_multi(df, args.output, args.min_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
-	# plot_changes(df, args.output, args.min_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
-	# plot_reliance_counts(counts, args.output, args.min_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
-	plot_reliance_proportions(counts, args.output, args.min_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
+	df, counts = analyse(raw_df, min_seconds=args.min_seconds, max_seconds=args.max_seconds, keep_only_who_changed_mind=args.keep_only_who_changed_mind, do_balance_treatments=args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
+	visualize_distribution(df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
+	# plot_reliance_vs_trust_attitude_effort_by_scenario(df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
+	plot_mitigation_by_ease(raw_df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
+	plot_per_scenario_multi(df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
+	# plot_changes(df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
+	# plot_reliance_counts(counts, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
+	plot_reliance_proportions(counts, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_mind, args.balance_treatments, filter_by_minimum_effort=args.filter_by_minimum_effort)
 
 if __name__ == "__main__":
 	main()
