@@ -99,7 +99,7 @@ def filter_invalid_rows(df):
 	df = df[df["Prolific ID"].str.len() >= 23]
 	# For any rows sharing both the same Prolific ID and the same Scenario, keep only the last occurrence.
 	df["Scenario"] = df["Task file"].apply(tidy_task)
-	df = df[df["Scenario"] != "Scenario 2"]
+	# df = df[df["Scenario"] != "Scenario 2"]
 	df["Reliance category"] = df.apply(label_reliance, axis=1)
 	df = df.drop_duplicates(subset=["Prolific ID", "Scenario"], keep="last")
 	# # Keep only those IDs that appear in 4 scenarios
@@ -342,7 +342,7 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 			ax.text(x[i], 1.07, f"p={p_vals[scen][0]:.3f}\n(d={p_vals[scen][1]:.2f})", weight ='bold' if p_vals[scen][0] < 0.05 else 'normal', ha='center', va='bottom', fontsize=9)
 
 		ax.set_xticks(x)
-		ax.set_xticklabels(list(map(lambda x: x.replace('Scenario','Scen.'), scenarios)), rotation=0, ha='center', fontsize=9)
+		ax.set_xticklabels(list(map(lambda x: x.replace('Scenario ','Scen.'), scenarios)), rotation=0, ha='center', fontsize=9)
 		ax.set_title(f"Expected: {label}", fontsize=9)
 		if ax is axes[0]:
 			ax.set_ylabel('Proportion within explanation type', fontsize=9)
@@ -465,7 +465,7 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 	if filter_by_minimum_effort:
 		d = d[(d['How much effort did it take to understand and complete this task?'] >= 1)]
 	d = d[(d["Did the explanation help you evaluate the AI's output?"] >= 1)]
-	d = d[(d["How useful was the explanation provided?"] >= 1)]
+	# d = d[(d["How useful was the explanation provided?"] >= 1)]
 
 	if keep_only_who_changed_mind:
 		d = d[
@@ -710,7 +710,7 @@ def plot_reliance_vs_trust_attitude_effort(df, out_dir, min_seconds=None, max_se
 				ax.margins(x=0.05, y=0.05)
 				continue
 
-			grp = ds_valid.groupby(['Explanation is MAGIX-defined', key])
+			grp = ds_valid.groupby([key])
 			rates = grp.agg(
 				over_rate=('is_over', 'mean'),
 				under_rate=('is_under', 'mean'),
@@ -718,32 +718,28 @@ def plot_reliance_vs_trust_attitude_effort(df, out_dir, min_seconds=None, max_se
 				n_under=('is_under', 'sum')
 			).reset_index()
 
-			for magix_flag, color, label_prefix in [
-				(False, color_non, 'Non-MAGIX'),
-				(True,  color_mag, 'MAGIX')
-			]:
-				subset = rates[rates['Explanation is MAGIX-defined'] == magix_flag].sort_values(key)
-				if subset.empty: continue
-				xvals = subset[key].astype(float)
-				ax.plot(xvals, subset['over_rate'], linestyle='-', marker='o', markersize=3, color=color,
-						label=f'Over {label_prefix}', linewidth=0.9)
-				ax.plot(xvals, subset['under_rate'], linestyle='--', marker='x', markersize=3, color=color,
-						label=f'Under {label_prefix}', linewidth=0.9)
+			subset = rates.sort_values(key)
+			if subset.empty: continue
+			xvals = subset[key].astype(float)
+			ax.plot(xvals, subset['over_rate'], linestyle='-', marker='o', markersize=3, color=color_mag,
+					label=f'Over-reliance', linewidth=0.9)
+			ax.plot(xvals, subset['under_rate'], linestyle='--', marker='x', markersize=3, color=color_non,
+					label=f'Under-reliance', linewidth=0.9)
 
-				if annotate_n:
-					ann_fs = max(base_font - 2, 6)
-					for _, row in subset.iterrows():
-						x = float(row[key])
-						ax.annotate(f"{int(row['n_over'])}",
-									(x, row['over_rate']),
-									xytext=(0, 5), textcoords='offset points',
-									ha='center', va='top',
-									fontsize=ann_fs, color=color, bbox=dict(facecolor='white', alpha=0.8, pad=1, edgecolor='none'))
-						ax.annotate(f"{int(row['n_under'])}",
-									(x, row['under_rate']),
-									xytext=(0, -5), textcoords='offset points',
-									ha='center', va='bottom',
-									fontsize=ann_fs, color=color, bbox=dict(facecolor='white', alpha=0.8, pad=1, edgecolor='none'))
+			if annotate_n:
+				ann_fs = max(base_font - 2, 6)
+				for _, row in subset.iterrows():
+					x = float(row[key])
+					ax.annotate(f"{int(row['n_over'])}",
+								(x, row['over_rate']),
+								xytext=(0, 5), textcoords='offset points',
+								ha='center', va='top',
+								fontsize=ann_fs, color=color_mag, bbox=dict(facecolor='white', alpha=0.8, pad=1, edgecolor='none'))
+					ax.annotate(f"{int(row['n_under'])}",
+								(x, row['under_rate']),
+								xytext=(0, -5), textcoords='offset points',
+								ha='center', va='bottom',
+								fontsize=ann_fs, color=color_non, bbox=dict(facecolor='white', alpha=0.8, pad=1, edgecolor='none'))
 
 			ax.set_title(f"Reliance vs {key}")
 			if c == 0:
@@ -757,26 +753,22 @@ def plot_reliance_vs_trust_attitude_effort(df, out_dir, min_seconds=None, max_se
 			ax.margins(x=0.05, y=0.05)
 
 			if show_stats:
-				stats = {}
-				for flag, label in [(False, 'Non-MAGIX'), (True, 'MAGIX')]:
-					sub = ds_valid[ds_valid['Explanation is MAGIX-defined'] == flag]
-					rho_o, p_o = spearmanr(sub[key], sub['is_over'], nan_policy='omit')
-					rho_u, p_u = spearmanr(sub[key], sub['is_under'], nan_policy='omit')
-					stats[label] = {
-						'rho_over': rho_o, 'p_over': p_o,
-						'rho_under': rho_u, 'p_under': p_u
-					}
+				sub = ds_valid
+				rho_o, p_o = spearmanr(sub[key], sub['is_over'], nan_policy='omit')
+				rho_u, p_u = spearmanr(sub[key], sub['is_under'], nan_policy='omit')
+				stats = {
+					'rho_over': rho_o, 'p_over': p_o,
+					'rho_under': rho_u, 'p_under': p_u
+				}
 
 				proxy = Line2D([], [], linestyle='')
 				handles = [proxy, proxy]
 				labels = []
-				for label in ['Non-MAGIX', 'MAGIX']:
-					s = stats[label]
-					labels.append(
-						f"{label}:\n"
-						f"\t$\\rho_{{\\mathrm{{over}}}}$={fmt(s['rho_over'])}{star(s['p_over'])} (p={fmt(s['p_over'], 2)})\n"
-						f"\t$\\rho_{{\\mathrm{{under}}}}$={fmt(s['rho_under'])}{star(s['p_under'])} (p={fmt(s['p_under'], 2)})"
-					)
+				s = stats
+				labels.append(
+					f"$\\rho_{{\\mathrm{{over}}}}$={fmt(s['rho_over'])}{star(s['p_over'])} (p={fmt(s['p_over'], 2)})\n"
+					f"$\\rho_{{\\mathrm{{under}}}}$={fmt(s['rho_under'])}{star(s['p_under'])} (p={fmt(s['p_under'], 2)})"
+				)
 
 				leg_stats = ax.legend(
 					handles, labels,
