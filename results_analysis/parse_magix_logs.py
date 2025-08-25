@@ -163,7 +163,7 @@ def build_questionnaire_row(records_after, prolific_id_value):
 	return row
 
 
-def build_scenario_row(slice_records, n, prolific_id_value):
+def build_scenario_row(slice_records, n, prolific_id_value, special_task_label=None):
 	"""
 	Build a row for scenario n from its slice (after start;scenarioN up to sNq6).
 	Adds time_spent_seconds and derived fields.
@@ -206,6 +206,12 @@ def build_scenario_row(slice_records, n, prolific_id_value):
 	task_val = row.get("task", None)
 	if not task_val:
 		return None
+
+	if special_task_label:
+		task_val = row['task'] = row['task'].replace(f'task{n}', f'task{n}{special_task_label}')
+
+	if 'task2_' in row['task']:
+		task_val = row['task'] = row['task'].replace("MAGIX", "NonMAGIX").replace("NonNonMAGIX", "MAGIX")
 
 	expected_answer = "Accept" if "_corr_" in task_val else "Reject"
 	row["expected_answer"] = expected_answer
@@ -278,10 +284,8 @@ def get_scenario_rows(log_files, special_task_label=None):
 			slice_rec = slice_scenario(records_after, n)
 			if slice_rec is None:
 				continue
-			row = build_scenario_row(slice_rec, n, prolific_id_value)
+			row = build_scenario_row(slice_rec, n, prolific_id_value, special_task_label=special_task_label)
 			if row:
-				if special_task_label:
-					row['task'] = row['task'].replace(f'task{n}', f'task{n}{special_task_label}')
 				scenarios_rows[n].append(row)
 	return questionnaire_rows, scenarios_rows
 

@@ -7,6 +7,7 @@ from matplotlib import colors as mcolors
 from matplotlib.patches import Patch
 from matplotlib.ticker import PercentFormatter, MaxNLocator
 from statsmodels.stats.proportion import proportions_ztest
+from statsmodels.stats.power import TTestIndPower, NormalIndPower
 import statsmodels.stats.api as sms
 from scipy.stats import chi2_contingency, fisher_exact, mannwhitneyu, spearmanr
 import numpy as np
@@ -33,6 +34,14 @@ HATCHES = {
 	"Appropriate reject": "..",
 	"Over-reliance": "//..",
 	"Under-reliance": "//",
+}
+
+scenario_name_map = {
+	'Scenario 2bis': 'S2-Q2',
+	'Scenario 2': 'S2-Q4',
+	'Scenario 1': 'S1-Q1',
+	'Scenario 3': 'S3-Q3',
+	'Scenario 4': 'S4-Q4',
 }
 
 def ensure_dir(p):
@@ -91,7 +100,8 @@ def label_reliance(r):
 	return "Other"
 
 def tidy_task(val):
-	return str(val).split("_")[0].replace('task','scenario ').capitalize()
+	v = str(val).split("_")[0].replace('task','scenario ').capitalize()
+	return scenario_name_map.get(v,v)
 
 def filter_invalid_rows(df):
 	df = df.copy()
@@ -99,7 +109,7 @@ def filter_invalid_rows(df):
 	df = df[df["Prolific ID"].str.len() >= 23]
 	# For any rows sharing both the same Prolific ID and the same Scenario, keep only the last occurrence.
 	df["Scenario"] = df["Task file"].apply(tidy_task)
-	# df = df[df["Scenario"] != "Scenario 2"]
+	# df = df[df["Scenario"] != "S2-Q4"]
 	df["Reliance category"] = df.apply(label_reliance, axis=1)
 	df = df.drop_duplicates(subset=["Prolific ID", "Scenario"], keep="last")
 	# # Keep only those IDs that appear in 4 scenarios
@@ -124,7 +134,8 @@ def analyse(df, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=T
 	
 	old_len = len(df)
 	df = df[df.apply(lambda x: within_quantiles(x, min_seconds, max_seconds), axis=1)]
-	print(f'{old_len-len(df)} entries were removed because produced in LESS than {min_seconds} and MORE than {max_seconds}')
+	if old_len-len(df):
+		print(f'<analyse::time_filter> Dropped entries: {old_len-len(df)}/{len(df)} entries were removed because produced in LESS than {min_seconds} and MORE than {max_seconds}')
 	if expected_answer:
 		df = df[df["Expected answer"] == expected_answer]
 
@@ -132,15 +143,28 @@ def analyse(df, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=T
 	# df = df[df["How would you rate your overall attitude toward Artificial Intelligence (AI)?"] <= 3]
 
 	if filter_by_minimum_effort: # Keep only who put some effort
+		old_len = len(df)
 		df = df[(df['How much effort did it take to understand and complete this task?'] >= 1)]
+		if old_len-len(df):
+			print(f'<analyse::effort_filter> Dropped entries: {old_len-len(df)}/{len(df)}')
+	
+	old_len = len(df)
+	df = df[(df["Did the explanation help you evaluate the AI's output?"] >= 1)] # Keep only who said was helped by the explanation
+	if old_len-len(df):
+		print(f'<analyse::helpfulness_filter> Dropped entries: {old_len-len(df)}/{len(df)}')
+
+	old_len = len(df)
 	df = df[(df["How easy was it to understand the explanation?"] >= 3)] # Keep only who understood the explanation
+	if old_len-len(df):
+		print(f'<analyse::ease_filter> Dropped entries: {old_len-len(df)}/{len(df)}')
+
 	# df = df[(
 	# 	(df["How confident are you in the decision you made? (without explanation)"] >= 1) 
 	# 	| (df["How confident are you in the decision you made? (with explanation)"] >= 1)
 	# )]
-	df = df[(df["Did the explanation help you evaluate the AI's output?"] >= 1)] # Keep only who said was helped by the explanation
 	# df = df[(df["How useful was the explanation provided?"] >= 1)] # Keep only who used the explanation		
 	if keep_only_who_changed_mind: # Keep only who actually used the explanations, updating their mental model
+		old_len = len(df)
 		df = df[
 			# (df["How useful was the explanation provided?"] >= 1)
 			(
@@ -148,6 +172,8 @@ def analyse(df, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=T
 				| (df["Explanation changed mind"] == True)
 			)
 		]
+		if old_len-len(df):
+			print(f'<analyse::measurable_effect_filter> Dropped entries: {old_len-len(df)}/{len(df)}')
 
 	# df = df[(df["How confident are you in the decision you made? (without explanation)"] < df["How confident are you in the decision you made? (with explanation)"])]
 	# df = df[df["Explanation changed mind"]]
@@ -306,6 +332,8 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 				bottom += vals
 		# p-value annotation via Mann–Whitney U
 		p_vals = {}
+		_tt_power = TTestIndPower()
+		alpha = 0.05  # or whatever you're using
 		for scen in scenarios:
 			sub = df_sub[df_sub['Scenario'] == scen]
 			scores_non = sub[sub['Explanation is MAGIX-defined'] == False]['Reliance category'].map(score_map)
@@ -320,34 +348,59 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 				diff = np.mean(scores_mag) - np.mean(scores_non)
 				pooled_var = ((scores_non.var(ddof=1) + scores_mag.var(ddof=1)) / 2)
 				d = diff / np.sqrt(pooled_var) if pooled_var > 0 else np.nan
-				# # Run Chi-squared test
-				# non_counts = scores_non.value_counts().reindex([0, 1], fill_value=0)
-				# mag_counts = scores_mag.value_counts().reindex([0, 1], fill_value=0)
-				# contingency = [
-				# 	[non_counts.loc[0], non_counts.loc[1]],
-				# 	[mag_counts.loc[0], mag_counts.loc[1]]
-				# ]
-				# chi2, p, dof, expected = chi2_contingency(contingency)
-				# # total N
-				# N = np.sum(contingency)
-				# # Cohen's w
-				# w = np.sqrt(chi2 / N)
+				# ---- post-hoc power (approx via two-sample t-test) ----
+				n_non, n_mag = len(scores_non), len(scores_mag)
+				power = np.nan
+				if np.isfinite(d) and n_non > 1 and n_mag > 1:
+					if _tt_power is not None:
+						# match direction: d = mean_mag - mean_non
+						ratio = n_non / n_mag
+						alt = 'larger' if d >= 0 else 'smaller'
+						power = _tt_power.power(
+							effect_size=float(d),  # sign matters with 'larger'/'smaller'
+							nobs1=n_mag,           # group1 = MAGIX group (to match d)
+							ratio=ratio,
+							alpha=alpha,
+							alternative=alt
+						)
 			else:
 				p = np.nan
 				# delta = np.nan
 				d = np.nan
 				# w = np.nan
-			p_vals[scen] = (p,d)
+				power = np.nan
+			p_vals[scen] = (p,d, power)
 		for i, scen in enumerate(scenarios):
-			ax.text(x[i], 1.07, f"p={p_vals[scen][0]:.3f}\n(d={p_vals[scen][1]:.2f})", weight ='bold' if p_vals[scen][0] < 0.05 else 'normal', ha='center', va='bottom', fontsize=9)
+			p_val, d_val, pw_val = p_vals[scen]
+
+			# Bold markers
+			if p_val < 0.01:
+				p_str = r"$\mathbf{p\!<\!0.01}$"
+			else:
+				# format with 3 decimals and drop leading "0"
+				p_fmt = f"{p_val:.3f}"
+				if p_val < 0.05:
+					p_str = rf"$\mathbf{{p\!=\!{p_fmt}}}$"
+				else:
+					p_str = f"p={p_fmt}"
+			pw_str = rf"$\mathbf{{pw\!=\!{pw_val:.2f}}}$" if pw_val >= 0.795 else f"pw={pw_val:.2f}"
+			d_str = f"(d={d_val:.2f})"
+
+			# Combine with newlines
+			text_str = f"{p_str}\n{pw_str}\n{d_str}".replace(' ','')
+
+			ax.text(
+				x[i], 1.1, text_str,
+				ha='center', va='bottom', fontsize=8
+			)
 
 		ax.set_xticks(x)
-		ax.set_xticklabels(list(map(lambda x: x.replace('Scenario ','Scen.'), scenarios)), rotation=0, ha='center', fontsize=9)
+		ax.set_xticklabels(list(map(lambda x: x.replace('Scenario ','S'), scenarios)), rotation=0, ha='center', fontsize=9)
 		ax.set_title(f"Expected: {label}", fontsize=9)
 		if ax is axes[0]:
 			ax.set_ylabel('Proportion within explanation type', fontsize=9)
 			ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-		ax.set_ylim(0, 1.2)
+		ax.set_ylim(0, 1.3)
 		ax.yaxis.set_major_locator(MaxNLocator(5))
 		ax.tick_params(axis='y', labelsize=9)
 
@@ -520,6 +573,8 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 	fig, axes = plt.subplots(nrows=2, ncols=ncols, figsize=(3.2 * ncols, 3.7), sharex=True, sharey=True)
 	axes = np.atleast_2d(axes)
 
+	_norm_power = NormalIndPower()
+	alpha = 0.05  # or whatever you're using
 	for c, (col, x_label, stub) in enumerate(valid_drivers):
 		d_sub = d[pd.notna(d[col])].copy()
 		d_sub["Scale"] = to_one_to_five(d_sub[col])
@@ -560,10 +615,14 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 				if tot0 > 0 and tot1 > 0:
 					_, pval = proportions_ztest([cnt0, cnt1], [tot0, tot1])
 					effect = sms.proportion_effectsize(cnt1 / tot1, cnt0 / tot0)
+					# Total sample size
+					alpha = 0.05
+					power = _norm_power.power(effect_size=effect, nobs1=tot0, alpha=alpha, ratio=tot1/tot0)
 				else:
 					pval = np.nan
 					effect = np.nan
-				p_values[e] = (pval, effect)
+					power = np.nan
+				p_values[e] = (pval, power, effect)
 
 			# Plot lines and annotate counts and p-values
 			y_values = {}
@@ -604,16 +663,30 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 
 			# P-value annotations
 			for e in levels:
-				pval, effect = p_values.get(e, (np.nan, np.nan))
+				pval, power, effect = p_values.get(e, (np.nan, np.nan, np.nan))
 				if np.isfinite(pval) and pval < 0.05:
 					y0 = y_values.get(False, [np.nan] * len(levels))[levels.index(e)]
 					y1 = y_values.get(True,  [np.nan] * len(levels))[levels.index(e)]
 					y_max = max([yv for yv in (y0, y1) if np.isfinite(yv)] + [0])
-					weight = 'bold' if pval < 0.05 else 'normal'
+					# Bold markers
+					if pval < 0.01:
+						p_str = r"$\mathbf{p\!<\!0.01}$"
+					else:
+						# format with 3 decimals and drop leading "0"
+						p_fmt = f"{pval:.3f}"
+						if pval < 0.05:
+							p_str = rf"$\mathbf{{p\!=\!{p_fmt}}}$"
+						else:
+							p_str = f"p={p_fmt}"
+					pw_str = rf"$\mathbf{{pw\!=\!{power:.2f}}}$" if power >= 0.795 else f"pw={power:.2f}"
+					d_str = f"(h={effect:.2f})"
+
+					# Combine with newlines
+					text_str = f"{p_str}\n{pw_str}\n{d_str}".replace(' ','')
 					ax.annotate(
-						f"p={pval:.3f}\n(h={effect:.2f})", (e, y_max + 0.01),
+						text_str, (e, y_max + 0.01),
 						xytext=(0, 12), textcoords="offset points",
-						ha="center", va="bottom", fontsize=8, fontweight=weight,
+						ha="center", va="bottom", fontsize=8,
 						bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.9)
 					)
 
@@ -1046,7 +1119,7 @@ def plot_effort_reliance_by_scenario(df, out_dir, min_seconds=None, max_seconds=
 
 				if sub['Effort'].nunique() >= 2:
 					rho, p = spearmanr(sub['Effort'], sub[metric])
-					stats_lines.append(f"{scen.replace('Scenario ','Scen.')}: ρ={rho:.2f} (p={p:.3f}), n={len(sub)}")
+					stats_lines.append(f"{scen.replace('Scenario ','S')}: ρ={rho:.2f} (p={p:.3f}), n={len(sub)}")
 
 			# draw stats legend in each subplot
 			if stats_lines:
@@ -1133,7 +1206,7 @@ def plot_effort_distribution(df, out_dir, min_seconds=None, max_seconds=None, cm
 	fig, ax = plt.subplots(figsize=(8, 4))
 	bp = ax.boxplot(
 		data,
-		labels=scenarios, #[sc.replace("Scenario", "Scen.") for sc in scenarios],
+		labels=scenarios, #[sc.replace("Scenario", "S") for sc in scenarios],
 		showmeans=True,
 		patch_artist=True,
 		boxprops=dict(linewidth=1.5),
@@ -1289,6 +1362,8 @@ def balance_treatments(df, seed=42):
 		})
 	parts = []
 	grouped = df.groupby(['Scenario', 'AI correctness'])
+	dropped_entries = 0
+	all_entries = 0
 	for (_, _), grp in grouped:
 		t = grp[grp['Explanation is MAGIX-defined'] == True]
 		f = grp[grp['Explanation is MAGIX-defined'] == False]
@@ -1296,8 +1371,11 @@ def balance_treatments(df, seed=42):
 		if n == 0:
 			# skip if one side is empty
 			continue
+		dropped_entries += abs(len(t)-len(f))
+		all_entries += len(t) + len(f)
 		parts.append(t.sample(n=n, random_state=seed))
 		parts.append(f.sample(n=n, random_state=seed))
+	print(f'<balance_treatments> Dropped entries: {dropped_entries}/{all_entries}')
 	return pd.concat(parts, ignore_index=True)
 
 def main():
@@ -1323,7 +1401,7 @@ def main():
 
 	if args.max_seconds is None:
 		args.max_seconds = 360 # 6 minutes
-		# args.max_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.99).clip(lower=300).astype(int).to_dict()
+		# args.max_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.99).clip(lower=360).astype(int).to_dict()
 		# print("Max seconds (99th percentile) per scenario:\n", args.max_seconds)
 
 	visualize_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
