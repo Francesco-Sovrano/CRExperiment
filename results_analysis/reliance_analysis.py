@@ -37,6 +37,8 @@ HATCHES = {
 }
 
 scenario_name_map = {
+	'Scenario 2easy': 'S2-Easy',
+	'Scenario 2hard': 'S2-Hard',
 	'Scenario 2bis': 'S2-Q2',
 	'Scenario 2': 'S2-Q4',
 	'Scenario 1': 'S1-Q1',
@@ -58,7 +60,7 @@ def annotate_bars(ax, fmt="{:.0f}", y_is_pct=False):
 						(b.get_x()+b.get_width()/2, y), xytext=(0,3),
 						textcoords="offset points", ha="center", va="bottom", fontsize=9)
 
-def load_frames(path):
+def load_frames(path, output_dir):
 	tmp_dir = None
 	try:
 		base = path
@@ -79,7 +81,7 @@ def load_frames(path):
 		if not frames:
 			raise FileNotFoundError("No scenario_*.csv files found.")
 		all_data = pd.concat(frames, ignore_index=True)
-		all_data.to_csv("formatted_results/all_data_combined.csv", index=False)
+		all_data.to_csv(os.path.join(output_dir,"all_data_combined.csv"), index=False)
 		return all_data
 	finally:
 		if tmp_dir and os.path.isdir(tmp_dir):
@@ -100,6 +102,7 @@ def label_reliance(r):
 	return "Other"
 
 def tidy_task(val):
+	print(val)
 	v = str(val).split("_")[0].replace('task','scenario ').capitalize()
 	return scenario_name_map.get(v,v)
 
@@ -1378,6 +1381,56 @@ def balance_treatments(df, seed=42):
 	print(f'<balance_treatments> Dropped entries: {dropped_entries}/{all_entries}')
 	return pd.concat(parts, ignore_index=True)
 
+def plot_gender_distribution(df, out_dir):
+	"""
+	Plot the distribution of participants' gender.
+	Assumes encoding: 0=Male, 1=Female, 2=Others/Prefer not to say.
+	"""
+	gender_col = "What is your gender?"
+	if gender_col not in df.columns:
+		print(f"Column '{gender_col}' not found in DataFrame.")
+		return
+
+	mapping = {0: "Male", 1: "Female", 2: "Others/Prefer not to say"}
+	d = df.copy()
+	d = d.drop_duplicates(subset=["Prolific ID"]) # Keep only one row per participant
+	d = d.dropna(subset=[gender_col])
+
+	# Map numeric codes to labels
+	d[gender_col] = d[gender_col].map(mapping).fillna("Unknown")
+
+	counts = d[gender_col].value_counts().reindex(mapping.values(), fill_value=0)
+	props = counts / counts.sum()
+
+	fig, ax = plt.subplots(figsize=(5, 4))
+	bars = ax.bar(counts.index, counts.values, color="skyblue", edgecolor="black")
+
+	# Annotate with count and percentage
+	for bar, pct in zip(bars, props.values):
+		h = bar.get_height()
+		ax.annotate(
+			f"{h}\n({pct*100:.1f}%)",
+			xy=(bar.get_x() + bar.get_width() / 2, h//2),
+			xytext=(0, 3),
+			textcoords="offset points",
+			ha="center",
+			va="bottom",
+			fontsize=9,
+			bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=0.2)
+		)
+
+	# ax.set_title("Participants' Gender Distribution")
+	ax.set_ylabel("Count")
+	ax.set_xlabel("Gender")
+	ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+	ax.grid(axis="y", linestyle="--", alpha=0.5)
+
+	plt.tight_layout()
+	out_path = os.path.join(out_dir, "gender_distribution.pdf")
+	plt.savefig(out_path)
+	plt.show()
+	print(f"Saved gender distribution plot to {out_path}")
+
 def main():
 	parser = argparse.ArgumentParser(description="Analyse reliance patterns in scenario CSVs.")
 	parser.add_argument("--input", required=True, help="Directory containing scenario_*.csv files, or a .zip of them.")
@@ -1391,7 +1444,7 @@ def main():
 
 	ensure_dir(args.output)
 
-	raw_df = load_frames(args.input)
+	raw_df = load_frames(args.input, args.output)
 	raw_df = filter_invalid_rows(raw_df)
 
 	# if args.min_seconds is None:
@@ -1404,6 +1457,7 @@ def main():
 		# args.max_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.99).clip(lower=360).astype(int).to_dict()
 		# print("Max seconds (99th percentile) per scenario:\n", args.max_seconds)
 
+	plot_gender_distribution(raw_df, args.output)
 	visualize_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
 	# plot_per_scenario_multi(raw_df, args.output)
 

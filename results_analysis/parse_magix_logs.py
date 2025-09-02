@@ -10,7 +10,7 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
 
 extra_data_folders = {
-	'2_bis': (2, 'experiment_results/scenario_2_bis'),
+	'2_bis': (2, 'scenario_2_bis'),
 }
 
 questionnaire_labels_map = {
@@ -80,7 +80,7 @@ def read_log_records(path):
 	return records
 
 
-def find_latest_prolific_idx(records: List[Tuple[dt.datetime, str, str]]) -> Optional[int]:
+def find_latest_prolific_idx(records):
 	"""
 	Return index of the latest 'prolific_id' entry, or None if not present.
 	"""
@@ -101,12 +101,14 @@ def rename_scenario_field(field, n):
 	  s1_reason -> s_reason
 	Other fields are returned unchanged.
 	"""
+	
+
 	# Exact tokens first
 	if field == f"task{n}":
 		return "task"
-	if field == f"user_response_{n}":
+	if field == f"user_response_{n}" or field == f"user_response_{n if not isinstance(n, str) else n[0]}":
 		return "user_response"
-	if field == f"user_response_{n}_XAI":
+	if field == f"user_response_{n}_XAI" or field == f"user_response_{n if not isinstance(n, str) else n[0]}_XAI":
 		return "user_response_XAI"
 
 	# s{n}..... -> remove the {n} immediately following 's'
@@ -120,14 +122,14 @@ def rename_scenario_field(field, n):
 	return field
 
 
-def slice_scenario(records_after: List[Tuple[dt.datetime, str, str]], n: int) -> Optional[List[Tuple[dt.datetime, str, str]]]:
+def slice_scenario(records_after, n):
 	"""
 	Given records AFTER latest prolific_id, return the slice for scenario n:
 	from after 'start;scenarioN' up to and including 'sNq6'.
 	"""
 	start_idx = None
 	for i, (_, key, val) in enumerate(records_after):
-		if key == "start" and val == f"scenario{n}":
+		if key == f"task{n}":
 			start_idx = i
 			break
 	if start_idx is None:
@@ -144,8 +146,7 @@ def slice_scenario(records_after: List[Tuple[dt.datetime, str, str]], n: int) ->
 		# Scenario start found but no sNq6 -> treat as incomplete, skip
 		return None
 
-	# Exclude the 'start;scenarioN' line itself
-	return records_after[start_idx + 1 : end_idx + 1]
+	return records_after[start_idx: end_idx + 1]
 
 
 def build_questionnaire_row(records_after, prolific_id_value):
@@ -163,7 +164,7 @@ def build_questionnaire_row(records_after, prolific_id_value):
 	return row
 
 
-def build_scenario_row(slice_records, n, prolific_id_value, special_task_label=None):
+def build_scenario_row(slice_records, n, prolific_id_value, log_files, special_task_label=None):
 	"""
 	Build a row for scenario n from its slice (after start;scenarioN up to sNq6).
 	Adds time_spent_seconds and derived fields.
@@ -210,8 +211,14 @@ def build_scenario_row(slice_records, n, prolific_id_value, special_task_label=N
 	if special_task_label:
 		task_val = row['task'] = row['task'].replace(f'task{n}', f'task{n}{special_task_label}')
 
-	if 'task2_' in row['task']:
-		task_val = row['task'] = row['task'].replace("MAGIX", "NonMAGIX").replace("NonNonMAGIX", "MAGIX")
+	if 'image_based' in str(log_files):
+		if 'task2_' in row['task']:
+			task_val = row['task'] = row['task'].replace("2", "2easy")
+		if '2bis' in row['task']:
+			task_val = row['task'] = row['task'].replace("2bis", "2hard")
+	else:
+		if 'task2_' in row['task']:
+			task_val = row['task'] = row['task'].replace("MAGIX", "NonMAGIX").replace("NonNonMAGIX", "MAGIX")
 
 	expected_answer = "Accept" if "_corr_" in task_val else "Reject"
 	row["expected_answer"] = expected_answer
@@ -280,12 +287,17 @@ def get_scenario_rows(log_files, special_task_label=None):
 		questionnaire_rows.append(questionnaire_row)
 
 		# scenarios 1..4
-		for n in (1, 2, 3, 4):
+		for n in (1, 2, '2bis', 3, 4):
 			slice_rec = slice_scenario(records_after, n)
 			if slice_rec is None:
 				continue
-			row = build_scenario_row(slice_rec, n, prolific_id_value, special_task_label=special_task_label)
+			row = build_scenario_row(slice_rec, n, prolific_id_value, log_files, special_task_label=special_task_label)
 			if row:
+				if 'image_based' in str(log_files):
+					if n == '2bis':
+						n = '2hard'
+					elif n == 2:
+						n = '2easy'
 				scenarios_rows[n].append(row)
 	return questionnaire_rows, scenarios_rows
 
@@ -307,8 +319,11 @@ def main():
 	questionnaire_rows, scenarios_rows = get_scenario_rows(log_files)
 	# Add extra experiments
 	for label,(n, extra_path) in extra_data_folders.items():
+		full_path = input_path / Path(extra_path)
+		if not full_path.exists():
+			continue
 		_questionnaire_rows, _scenarios_rows = get_scenario_rows(
-			gather_log_files(Path(extra_path)), 
+			gather_log_files(full_path), 
 			special_task_label=label.split('_')[-1]
 		)
 		scenarios_rows[label] = _scenarios_rows[n]
