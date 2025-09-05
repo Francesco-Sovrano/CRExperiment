@@ -111,11 +111,12 @@ def filter_invalid_rows(df):
 	df = df.copy()
 	# Keep only valid Prolific IDs
 	df = df[df["Prolific ID"].str.len() >= 23]
+	# Keep only valid changes of mind
+	df = df[~df["What made you change your decision?"].str.contains(r"did(n't| not) change", case=False, na=False)]
 	# For any rows sharing both the same Prolific ID and the same Scenario, keep only the last occurrence.
 	df["Scenario"] = df["Task file"].apply(tidy_task)
-	# df = df[df["Scenario"] != "S2-Q4"]
 	df["Reliance category"] = df.apply(label_reliance, axis=1)
-	df = df.drop_duplicates(subset=["Prolific ID", "Scenario", "Format"], keep="last")
+	df = df.drop_duplicates(subset=["Prolific ID", "Task file", "Format"], keep="last")
 	# # Keep only those IDs that appear in 4 scenarios
 	# df = df[df.groupby("Prolific ID")["Scenario"].transform("nunique").eq(4)]
 	return df
@@ -143,8 +144,9 @@ def analyse(df, min_seconds=None, max_seconds=None, keep_only_who_changed_mind=T
 	if expected_answer:
 		df = df[df["Expected answer"] == expected_answer]
 
-	# df = df[df["How much do you trust AI systems in general?"] <= 3]
-	# df = df[df["How would you rate your overall attitude toward Artificial Intelligence (AI)?"] <= 3]
+	# df = df[(df["How much do you trust AI systems in general?"] <= 3)]
+	# df = df[(df["How would you rate your overall attitude toward Artificial Intelligence (AI)?"] <= 3)]
+	# df = df[(df['How familiar are you with Artificial Intelligence (AI)?'] >= 1)]
 
 	if filter_by_minimum_effort: # Keep only who put some effort
 		old_len = len(df)
