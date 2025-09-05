@@ -10,7 +10,7 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
 
 extra_data_folders = {
-	'2_bis': (2, 'scenario_2_bis'),
+	'2': (2, 'scenario_2_bis'),
 }
 
 questionnaire_labels_map = {
@@ -31,6 +31,7 @@ scenario_labels_map = {
 	"changed_mind": "Explanation changed mind",
 	"reason_que": "What made you change your decision?",
 	"task": "Task file",
+	"format": "Format",
 	"expected_answer": "Expected answer",
 	"is_MAGIX_explanation": "Explanation is MAGIX-defined",
 	"user_response": "Response before explanation",
@@ -209,16 +210,18 @@ def build_scenario_row(slice_records, n, prolific_id_value, log_files, special_t
 		return None
 
 	if special_task_label:
-		task_val = row['task'] = row['task'].replace(f'task{n}', f'task{n}{special_task_label}')
+		task_val = row['task'] = row['task'].replace(f'task{n}', f'task{special_task_label}')
 
-	if 'image_based' in str(log_files):
-		if 'task2_' in row['task']:
-			task_val = row['task'] = row['task'].replace("2", "2easy")
+	task_format = row['format'] = 'image_based' if 'image_based' in str(log_files) else 'text_based'
+
+	if task_format == 'image_based':
 		if '2bis' in row['task']:
 			task_val = row['task'] = row['task'].replace("2bis", "2hard")
-	else:
+		# elif 'task2_' in row['task']:
+		# 	task_val = row['task'] = row['task'].replace("2", "2easy")
+	elif task_format == 'text_based' and 'scenario_2_bis' not in str(log_files):
 		if 'task2_' in row['task']:
-			task_val = row['task'] = row['task'].replace("MAGIX", "NonMAGIX").replace("NonNonMAGIX", "MAGIX")
+			task_val = row['task'] = row['task'].replace("task2_", "task2bis_").replace("MAGIX", "NonMAGIX").replace("NonNonMAGIX", "MAGIX")
 
 	expected_answer = "Accept" if "_corr_" in task_val else "Reject"
 	row["expected_answer"] = expected_answer
@@ -293,51 +296,74 @@ def get_scenario_rows(log_files, special_task_label=None):
 				continue
 			row = build_scenario_row(slice_rec, n, prolific_id_value, log_files, special_task_label=special_task_label)
 			if row:
-				if 'image_based' in str(log_files):
+				if row['format'] == 'image_based':
 					if n == '2bis':
 						n = '2hard'
-					elif n == 2:
-						n = '2easy'
+					# elif n == 2:
+					# 	n = '2easy'
+				elif row['format'] == 'text_based' and 'scenario_2_bis' not in str(log_files):
+					if n == 2:
+						n = '2bis'
 				scenarios_rows[n].append(row)
 	return questionnaire_rows, scenarios_rows
 
 def main():
 	parser = argparse.ArgumentParser(description="Parse MAGIX logs and produce merged CSV tables.")
-	parser.add_argument("--input", required=True, help="Directory containing .log files, or a .zip of them.")
+	parser.add_argument(
+		"--inputs", 
+		required=True, 
+		nargs="+", 
+		help="One or more directories containing .log files, or .zip files of them."
+	)
 	parser.add_argument("--output", required=True, help="Directory to write CSV outputs.")
 	args = parser.parse_args()
 
-	input_path = Path(args.input)
 	output_dir = Path(args.output)
 	output_dir.mkdir(parents=True, exist_ok=True)
 
-	log_files = gather_log_files(input_path)
-	if not log_files:
-		print("No .log files found.")
-		return
+	questionnaire_rows_all = []
+	scenarios_rows_all = defaultdict(list)
 
-	questionnaire_rows, scenarios_rows = get_scenario_rows(log_files)
-	# Add extra experiments
-	for label,(n, extra_path) in extra_data_folders.items():
-		full_path = input_path / Path(extra_path)
-		if not full_path.exists():
+	for input_path_str in args.inputs:
+		input_path = Path(input_path_str)
+		log_files = gather_log_files(input_path)
+		if not log_files:
+			print(f"No .log files found in {input_path}.")
 			continue
-		_questionnaire_rows, _scenarios_rows = get_scenario_rows(
-			gather_log_files(full_path), 
-			special_task_label=label.split('_')[-1]
-		)
-		scenarios_rows[label] = _scenarios_rows[n]
-		questionnaire_rows += _questionnaire_rows
+
+		questionnaire_rows, scenarios_rows = get_scenario_rows(log_files)
+		# for n, v in scenarios_rows.items():
+		# 	print(0, n, len(v), input_path)
+
+		# Add extra experiments (per input path)
+		for label, (n, extra_path) in extra_data_folders.items():
+			full_path = input_path / Path(extra_path)
+			if not full_path.exists():
+				continue
+			_questionnaire_rows, _scenarios_rows = get_scenario_rows(
+				gather_log_files(full_path), 
+				special_task_label=label
+			)
+			scenarios_rows[label] = _scenarios_rows[n]
+			# print(0, label, len(_scenarios_rows[n]), full_path)
+			questionnaire_rows += _questionnaire_rows
+
+		questionnaire_rows_all.extend(questionnaire_rows)
+		for n, v in scenarios_rows.items():
+			scenarios_rows_all[str(n)] += v
+
+	for n, v in scenarios_rows_all.items():
+		print('Dataset size:', n, len(v))
 
 	# Write outputs
 	write_merged_csv(
-		questionnaire_rows,
+		questionnaire_rows_all,
 		output_dir / "questionnaire.csv",
 		preferred_order_map=questionnaire_labels_map,
 	)
 	print(f"Wrote: {output_dir / 'questionnaire.csv'}")
 
-	for n,v in scenarios_rows.items():
+	for n, v in scenarios_rows_all.items():
 		write_merged_csv(
 			v,
 			output_dir / f"scenario_{n}.csv",

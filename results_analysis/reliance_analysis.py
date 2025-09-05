@@ -37,13 +37,14 @@ HATCHES = {
 }
 
 scenario_name_map = {
-	'Scenario 2easy': 'S2-Easy',
-	'Scenario 2hard': 'S2-Hard',
-	'Scenario 2bis': 'S2-Q2',
-	'Scenario 2': 'S2-Q4',
-	'Scenario 1': 'S1-Q1',
-	'Scenario 3': 'S3-Q3',
-	'Scenario 4': 'S4-Q4',
+	'Scenario 2easy': 'Q2-Easy',
+	'Scenario 2hard': 'Q2-Hard',
+	'Scenario 2bis': 'Q2→Q4',
+	# 'Scenario 2bis': 'Q4',
+	'Scenario 2': 'Q2',
+	'Scenario 1': 'Q1',
+	'Scenario 3': 'Q3',
+	'Scenario 4': 'Q4',
 }
 
 def ensure_dir(p):
@@ -114,7 +115,7 @@ def filter_invalid_rows(df):
 	df["Scenario"] = df["Task file"].apply(tidy_task)
 	# df = df[df["Scenario"] != "S2-Q4"]
 	df["Reliance category"] = df.apply(label_reliance, axis=1)
-	df = df.drop_duplicates(subset=["Prolific ID", "Scenario"], keep="last")
+	df = df.drop_duplicates(subset=["Prolific ID", "Scenario", "Format"], keep="last")
 	# # Keep only those IDs that appear in 4 scenarios
 	# df = df[df.groupby("Prolific ID")["Scenario"].transform("nunique").eq(4)]
 	return df
@@ -404,7 +405,8 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 			ax.set_ylabel('Proportion within explanation type', fontsize=9)
 			ax.yaxis.set_major_formatter(PercentFormatter(1.0))
 		ax.set_ylim(0, 1.3)
-		ax.yaxis.set_major_locator(MaxNLocator(5))
+		# ax.yaxis.set_major_locator(MaxNLocator(5))
+		ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0]) # Force ticks only up to 1.0
 		ax.tick_params(axis='y', labelsize=9)
 
 	# Figure-level legend for Explanation type on top-left
@@ -1448,7 +1450,7 @@ def main():
 	raw_df = filter_invalid_rows(raw_df)
 
 	# if args.min_seconds is None:
-	# 	args.min_seconds = 30 # 30 seconds
+	# 	args.min_seconds = 10 # 30 seconds
 	# 	# args.min_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.01).clip(upper=30).astype(int).to_dict()
 	# 	# print("Min seconds (1st percentile) per scenario:\n", args.min_seconds)
 
