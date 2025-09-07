@@ -217,8 +217,8 @@ def build_scenario_row(slice_records, n, prolific_id_value, log_files, special_t
 	if task_format == 'image_based':
 		if '2bis' in row['task']:
 			task_val = row['task'] = row['task'].replace("2bis", "2hard")
-		# elif 'task2_' in row['task']:
-		# 	task_val = row['task'] = row['task'].replace("2", "2easy")
+		elif 'task2_' in row['task']:
+			task_val = row['task'] = row['task'].replace("2", "2easy")
 	elif task_format == 'text_based' and 'scenario_2_bis' not in str(log_files):
 		if 'task2_' in row['task']:
 			task_val = row['task'] = row['task'].replace("task2_", "task2bis_").replace("MAGIX", "NonMAGIX").replace("NonNonMAGIX", "MAGIX")
@@ -299,8 +299,8 @@ def get_scenario_rows(log_files, special_task_label=None):
 				if row['format'] == 'image_based':
 					if n == '2bis':
 						n = '2hard'
-					# elif n == 2:
-					# 	n = '2easy'
+					elif n == 2:
+						n = '2easy'
 				elif row['format'] == 'text_based' and 'scenario_2_bis' not in str(log_files):
 					if n == 2:
 						n = '2bis'

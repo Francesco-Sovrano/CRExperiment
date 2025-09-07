@@ -39,7 +39,7 @@ HATCHES = {
 }
 
 scenario_name_map = {
-	'Scenario 2easy': 'Q2-Easy',
+	'Scenario 2easy': {'all':'Q2','image_based':'Q2'},
 	'Scenario 2hard': {'all':'Q2','image_based':'Q2-Hard'},
 	'Scenario 2bis': {'all':'Q4','text_based':'Q2→Q4'},
 	# 'Scenario 2bis': 'Q4',
