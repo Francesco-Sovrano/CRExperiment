@@ -84,7 +84,6 @@ def load_frames(path, output_dir):
 		if not frames:
 			raise FileNotFoundError("No scenario_*.csv files found.")
 		all_data = pd.concat(frames, ignore_index=True)
-		all_data.to_csv(os.path.join(output_dir,"all_data_combined.csv"), index=False)
 		return all_data
 	finally:
 		if tmp_dir and os.path.isdir(tmp_dir):
@@ -112,8 +111,42 @@ def tidy_task(val,_format):
 
 def filter_invalid_rows(df, _input):
 	df = df.copy()
-	# Keep only valid Prolific IDs
-	df = df[df["Prolific ID"].str.len() >= 23]
+
+	demographics_df = pd.concat([
+		pd.read_csv(os.path.join('demographics/all_data', file)) 
+		for file in os.listdir('demographics/all_data') 
+		if file.endswith('.csv')
+	], ignore_index=True)
+	demographics_df.to_csv("demographics/demographics.csv", index=False)
+	
+	# Quartiles
+	q1 = demographics_df['Total approvals'].quantile(0.25)  # 25th percentile
+	q2 = demographics_df['Total approvals'].quantile(0.50)  # 50th percentile (same as median)
+	q3 = demographics_df['Total approvals'].quantile(0.75)  # 75th percentile
+	# Print results
+	print("Q1 (25th percentile):", q1)
+	print("Q2 (50th percentile / Median):", q2)
+	print("Q3 (75th percentile):", q3)
+
+	# Join on Participant id (in demographics_df) and Prolific ID (in other_df)
+	def find_participant(prolific_id, participants):
+		for p in participants:
+			if p in prolific_id:
+				return p
+		return None
+
+	# Map Prolific ID to Participant id and then join demographics_df to df in order to keep only valid Prolific IDs
+	participants = demographics_df["Participant id"].unique().tolist()
+	df["Participant id"] = df["Prolific ID"].apply(lambda x: find_participant(x, participants))
+
+	df = df.merge(
+		demographics_df,
+		on="Participant id",
+		how="inner"
+	)
+
+	# # Alternative way to keep only valid Prolific IDs
+	# df = df[df["Prolific ID"].str.len() >= 23]
 	# Keep only valid changes of mind
 	df = df[~df["What made you change your decision?"].str.contains(r"(n't| not) change", case=False, na=False)]
 	# For any rows sharing both the same Prolific ID and the same Scenario, keep only the last occurrence.
@@ -122,6 +155,7 @@ def filter_invalid_rows(df, _input):
 	df = df.drop_duplicates(subset=["Prolific ID", "Task file", "Format"], keep="first")
 	# # Keep only those IDs that appear in 4 scenarios
 	# df = df[df.groupby("Prolific ID")["Scenario"].transform("nunique").ge(1)]
+
 	return df
 
 # Apply filtering row-by-row
@@ -164,18 +198,23 @@ def analyse(df, min_seconds=None, max_seconds=None, keep_only_who_changed_decisi
 			print(f'<analyse::changed_mind_only> Dropped entries: {old_len-len(df)}/{old_len} ({100*(old_len-len(df))/old_len:.2f}%)')
 	else: # Keep only who actually used the explanations, updating their mental model
 		old_len = len(df)
+		# lower_quartile = df['Total approvals'].quantile(0.25)
 		df = df[
 			(
 				(df["Explanation changed mind"] == True) |
-				(
-					(df["How confident are you in the decision you made? (without explanation)"] != df["How confident are you in the decision you made? (with explanation)"]) &
-					(df["How useful was the explanation provided?"] >= 1) &
-					(df["Did the explanation help you evaluate the AI's output?"] >= 1)
-				)
+				(df["How useful was the explanation provided?"] >= 1) # the loosest filter possible to minimise loss of power/sample size
 			)
 		]
 		if old_len-len(df):
 			print(f'<analyse::measurable_effect_filter> Dropped entries: {old_len-len(df)}/{old_len} ({100*(old_len-len(df))/old_len:.2f}%)')
+
+		# Keep only participants with a higher approval rate, as they are less likely to have answered the usefulness question poorly
+		lower_quartile = df['Total approvals'].quantile(0.25)
+		print('Lower quartile of total approvals', lower_quartile)
+		old_len = len(df)
+		df = df[(df['Total approvals'] >= min(400,lower_quartile))] # 400 is close to the median of the global distribution; here the quantile is computed on a slice of that data
+		if old_len-len(df):
+			print(f'<analyse::high_approval_rate_filter> Dropped entries: {old_len-len(df)}/{old_len} ({100*(old_len-len(df))/old_len:.2f}%)')
 
 	# df = df[(df["How confident are you in the decision you made? (without explanation)"] < df["How confident are you in the decision you made? (with explanation)"])]
 	# df = df[df["Explanation changed mind"]]
@@ -279,8 +318,10 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 			keep_only_who_easily_understood_explanation=keep_only_who_easily_understood_explanation,
 			expected_answer=expected
 		)
-		if label == 'All':
-			df_sub = balance_treatments(df_sub)
+		
+		if label == 'All' and not do_balance_treatments:
+			df_sub = balance_bar(df_sub)
+
 		# all combinations of grouping keys
 		full_index = pd.MultiIndex.from_product(
 			[scenarios, expl, reliance],
@@ -540,20 +581,29 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 			print(f'<analyse::changed_mind_only> Dropped entries: {old_len-len(d)}/{old_len} ({100*(old_len-len(d))/old_len:.2f}%)')
 	else: # Keep only who actually used the explanations, updating their mental model
 		old_len = len(d)
+
+		lower_quartile = d['Total approvals'].quantile(0.25)
 		d = d[
 			(
 				(d["Explanation changed mind"] == True) |
 				(
-					(d["How confident are you in the decision you made? (without explanation)"] != d["How confident are you in the decision you made? (with explanation)"]) &
+					# (d["How confident are you in the decision you made? (without explanation)"] != d["How confident are you in the decision you made? (with explanation)"]) &
+					# (d["Did the explanation help you evaluate the AI's output?"] >= 1) &
 					(d["How useful was the explanation provided?"] >= 1) &
-					(d["Did the explanation help you evaluate the AI's output?"] >= 1)
+					(d['Total approvals'] >= min(495,lower_quartile))
 				)
 			)
 		]
 		if old_len-len(d):
 			print(f'<analyse::measurable_effect_filter> Dropped entries: {old_len-len(d)}/{old_len} ({100*(old_len-len(d))/old_len:.2f}%)')
 
-	d = balance_treatments(d)
+		# old_len = len(d)
+		# d = d[(d['Total approvals'] >= 400)]
+		# if old_len-len(d):
+		# 	print(f'<analyse::high_approval_rate_filter> Dropped entries: {old_len-len(d)}/{old_len} ({100*(old_len-len(d))/old_len:.2f}%)')
+
+	if not do_balance_treatments:
+		d = balance_treatments(d)
 
 	# ---------------------------
 	# Drivers to plot (column, pretty x-label, stub)
@@ -727,8 +777,8 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 
 		# Only left column shows y-axis label
 		if c == 0:
-			axes[0, 0].set_ylabel("Appropriate\nReject", rotation=90)
-			axes[1, 0].set_ylabel("Appropriate\nAccept", rotation=90)
+			axes[0, 0].set_ylabel("Appropriate\nrejections", rotation=90)
+			axes[1, 0].set_ylabel("Appropriate\nacceptances", rotation=90)
 
 	# One shared legend (top-right outside the grid)
 	axes[0,-1].legend(
@@ -742,7 +792,7 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 	plt.tight_layout()  # leave room for the legend
 	os.makedirs(out_dir, exist_ok=True)
 	fname = (
-		f"mitigation_by_ALL_DRIVERS-s={min_seconds}_{max_seconds}"
+		f"appropriateness_counts_by_ALL_DRIVERS-s={min_seconds}_{max_seconds}"
 		f"{'-balanced' if do_balance_treatments else ''}"
 		f"{'-changed_decision' if keep_only_who_changed_decision else ''}.pdf"
 	)
@@ -1373,21 +1423,100 @@ def visualize_distribution(df, out_dir, min_seconds=None, max_seconds=None, keep
 
 	return table_counts
 
+def _stratified_sample(sub, by_col, n, seed=42):
+	"""Sample n rows from `sub` without replacement, preserving the distribution of `by_col`."""
+	if n >= len(sub):
+		return sub
+
+	rng = np.random.default_rng(seed)
+
+	counts = sub[by_col].value_counts(dropna=False)
+	total = counts.sum()
+
+	# Ideal fractional targets, then floor + remainder allocation
+	ideal = counts / total * n
+	base = np.floor(ideal).astype(int)
+	remainder = int(n - base.sum())
+
+	# Distribute the remainder by largest fractional parts, without exceeding capacity
+	fracs = (ideal - base).sort_values(ascending=False)
+
+	for key in fracs.index:
+		if remainder == 0:
+			break
+		if base[key] < counts[key]:
+			base[key] += 1
+			remainder -= 1
+
+	# Defensive fallback (shouldn't trigger if n <= len(sub))
+	if base.sum() != n:
+		# Fill any leftover by cycling categories with remaining capacity
+		for key in counts.index:
+			if base.sum() == n:
+				break
+			if base[key] < counts[key]:
+				base[key] += 1
+
+	# Sample per level with unique draws (replace=False), deterministic per call
+	buckets = []
+	for level, k in base.items():
+		if k <= 0:
+			continue
+		if pd.isna(level):
+			level_df = sub[sub[by_col].isna()]
+		else:
+			level_df = sub[sub[by_col] == level]
+		if k > len(level_df):
+			k = len(level_df)  # safety
+		if k > 0:
+			# different random_state per bucket but derived from the main seed
+			buckets.append(level_df.sample(n=k, replace=False,
+										   random_state=int(rng.integers(0, 2**32-1))))
+	return pd.concat(buckets, ignore_index=False) if buckets else sub.iloc[0:0]
+
+
+def balance_bar(df, seed=42):
+	"""
+	For each (Scenario, Explanation is MAGIX-defined) group:
+	- Balance Accept vs Reject so they have equal size.
+	- Within each side, sub-sample in a stratified way so that
+	  'User error' proportions are preserved.
+	"""
+	np.random.seed(seed)
+	parts = []
+	dropped_entries = 0
+	all_entries = 0
+
+	grouped = df.groupby(['Scenario', 'Explanation is MAGIX-defined'])
+	for (_, _), grp in grouped:
+		t = grp[grp['Expected answer'] == 'Accept']  # AI correct
+		f = grp[grp['Expected answer'] == 'Reject']  # AI incorrect
+		n = min(len(t), len(f))
+		if n == 0:
+			continue
+		
+		dropped_entries += abs(len(t) - len(f))
+		all_entries += len(t) + len(f)
+		
+		# stratified sampling by "User error"
+		t_strat = _stratified_sample(t, by_col='User error', n=n, seed=seed)
+		f_strat = _stratified_sample(f, by_col='User error', n=n, seed=seed)
+
+		parts.append(t_strat)
+		parts.append(f_strat)
+
+	print(f'<balance_treatments> Dropped entries: {dropped_entries}/{all_entries} '
+		  f'({100*dropped_entries/all_entries:.2f}%)')
+	return pd.concat(parts, ignore_index=True)
+
 def balance_treatments(df, seed=42):
 	"""
 	For each (Scenario, AI correctness) group, randomly down‐sample
 	the larger of the MAGIX vs non-MAGIX subsets so both have equal size.
 	"""
 	np.random.seed(seed)
-	# ensure AI correctness column exists
-	if 'AI correctness' not in df.columns:
-		df = df.copy()
-		df['AI correctness'] = df['Expected answer'].map({
-			'Accept': 'AI Correct',
-			'Reject': 'AI Incorrect'
-		})
 	parts = []
-	grouped = df.groupby(['Scenario', 'AI correctness'])
+	grouped = df.groupby(['Scenario', 'Expected answer'])
 	dropped_entries = 0
 	all_entries = 0
 	for (_, _), grp in grouped:
@@ -1399,8 +1528,13 @@ def balance_treatments(df, seed=42):
 			continue
 		dropped_entries += abs(len(t)-len(f))
 		all_entries += len(t) + len(f)
-		parts.append(t.sample(n=n, random_state=seed))
-		parts.append(f.sample(n=n, random_state=seed))
+
+		# stratified sampling by "User error"
+		t_strat = _stratified_sample(t, by_col='User error', n=n)
+		f_strat = _stratified_sample(f, by_col='User error', n=n)
+
+		parts.append(t_strat)
+		parts.append(f_strat)
 	print(f'<balance_treatments> Dropped entries: {dropped_entries}/{all_entries} ({100*dropped_entries/all_entries:.2f}%)')
 	return pd.concat(parts, ignore_index=True)
 
@@ -1469,9 +1603,10 @@ def main():
 
 	raw_df = load_frames(args.input, args.output)
 	raw_df = filter_invalid_rows(raw_df, args.input)
+	raw_df.to_csv(os.path.join(args.output,"all_data_combined.csv"), index=False)
 
 	if args.min_seconds is None:
-		args.min_seconds = 10 # 30 seconds
+		args.min_seconds = 30 # 10 seconds
 	# 	# args.min_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.01).clip(upper=30).astype(int).to_dict()
 	# 	# print("Min seconds (1st percentile) per scenario:\n", args.min_seconds)
 
@@ -1481,7 +1616,7 @@ def main():
 	# 	# print("Max seconds (99th percentile) per scenario:\n", args.max_seconds)
 
 	plot_gender_distribution(raw_df, args.output)
-	visualize_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
+	# visualize_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
 	plot_effort_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
 	plot_reliance_vs_trust_attitude_effort(raw_df, args.output, args.min_seconds, args.max_seconds)
 	# plot_reliance_vs_trust_attitude_effort_by_scenario(raw_df, args.output, args.min_seconds, args.max_seconds)

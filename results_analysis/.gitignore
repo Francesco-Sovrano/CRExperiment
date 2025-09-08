@@ -3,9 +3,6 @@
 
 *.pkl
 *.zip
-cache/*
-extra/*
-logs/*
 *.csv
 
 # Byte-compiled / optimized / DLL files
