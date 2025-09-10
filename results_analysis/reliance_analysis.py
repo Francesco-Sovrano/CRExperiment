@@ -118,6 +118,8 @@ def filter_invalid_rows(df, _input):
 		if file.endswith('.csv')
 	], ignore_index=True)
 	demographics_df.to_csv("demographics/demographics.csv", index=False)
+
+	demographics_df = demographics_df[demographics_df['Status'] == 'APPROVED']
 	
 	# Quartiles
 	q1 = demographics_df['Total approvals'].quantile(0.25)  # 25th percentile
@@ -1332,27 +1334,7 @@ def plot_effort_distribution(df, out_dir, min_seconds=None, max_seconds=None, cm
 	if SHOW_ALL_FIGURES: plt.show()
 	print(f"Saved improved effort distribution plot to {out_path}")
 
-def visualize_distribution(df, out_dir, min_seconds=None, max_seconds=None, keep_only_who_changed_decision=False, do_balance_treatments=False, keep_only_who_easily_understood_explanation=False, figsize=(8, 5)):
-	"""
-	Compute and plot the distribution of participants across:
-	  - Scenario
-	  - AI correctness (Accept → AI Correct, Reject → AI Incorrect)
-	  - Explanation is MAGIX-defined (True/False)
-
-	Parameters
-	----------
-	df : pandas.DataFrame
-		DataFrame must contain columns
-		"Scenario", "Expected answer", and "Explanation is MAGIX-defined".
-	figsize : tuple, default (8, 6)
-		Figure size.
-
-	Returns
-	-------
-	table_counts : pandas.DataFrame
-		Multi‐indexed table of raw counts with index=(Scenario, AI correctness)
-		and columns=[False, True].
-	"""
+def visualize_distribution(df, out_dir, min_seconds=None, max_seconds=None, keep_only_who_changed_decision=False, do_balance_treatments=False, keep_only_who_easily_understood_explanation=False, keep_only_measurable_effects=False):
 	# 0) Filter and copy
 	df = df.copy()
 	df = df[df.apply(lambda x: within_quantiles(x, min_seconds, max_seconds), axis=1)]
@@ -1377,7 +1359,7 @@ def visualize_distribution(df, out_dir, min_seconds=None, max_seconds=None, keep
 	table_to_plot = table_counts
 
 	# 5) Plot
-	fig, ax = plt.subplots(figsize=figsize)
+	fig, ax = plt.subplots(figsize=(8, 5))
 	table_to_plot.plot(
 		kind="bar",
 		stacked=True,
@@ -1385,7 +1367,7 @@ def visualize_distribution(df, out_dir, min_seconds=None, max_seconds=None, keep
 		width=0.8
 	)
 	ax.set_ylabel("Count")
-	ax.set_title("Participants by Scenario / AI correctness / Explanation")
+	# ax.set_title("Participants by Scenario / AI correctness / Explanation")
 	ax.set_xlabel("")
 
 	# Tidy up legend
@@ -1417,7 +1399,7 @@ def visualize_distribution(df, out_dir, min_seconds=None, max_seconds=None, keep
 	plt.tight_layout()
 
 	# 8) Save and show
-	out_path = os.path.join(out_dir, f"participants_distribution-s={min_seconds}_{max_seconds}{'-explanation_clarity' if keep_only_who_easily_understood_explanation else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_decision' if keep_only_who_changed_decision else ''}.pdf")
+	out_path = os.path.join(out_dir, f"participants_distribution-s={min_seconds}_{max_seconds}{'-measurable_effects' if keep_only_measurable_effects else ''}{'-explanation_clarity' if keep_only_who_easily_understood_explanation else ''}{'-balanced' if do_balance_treatments else ''}{'-changed_decision' if keep_only_who_changed_decision else ''}.pdf")
 	plt.savefig(out_path)
 	if SHOW_ALL_FIGURES: plt.show()
 
@@ -1559,7 +1541,7 @@ def plot_gender_distribution(df, out_dir):
 	counts = d[gender_col].value_counts().reindex(mapping.values(), fill_value=0)
 	props = counts / counts.sum()
 
-	fig, ax = plt.subplots(figsize=(5, 4))
+	fig, ax = plt.subplots(figsize=(5, 2.5))
 	bars = ax.bar(counts.index, counts.values, color="skyblue", edgecolor="black")
 
 	# Annotate with count and percentage
@@ -1578,7 +1560,7 @@ def plot_gender_distribution(df, out_dir):
 
 	# ax.set_title("Participants' Gender Distribution")
 	ax.set_ylabel("Count")
-	ax.set_xlabel("Gender")
+	ax.set_xlabel("")
 	ax.yaxis.set_major_locator(MaxNLocator(integer=True))
 	ax.grid(axis="y", linestyle="--", alpha=0.5)
 
@@ -1616,7 +1598,7 @@ def main():
 	# 	# print("Max seconds (99th percentile) per scenario:\n", args.max_seconds)
 
 	plot_gender_distribution(raw_df, args.output)
-	# visualize_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
+	visualize_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
 	plot_effort_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
 	plot_reliance_vs_trust_attitude_effort(raw_df, args.output, args.min_seconds, args.max_seconds)
 	# plot_reliance_vs_trust_attitude_effort_by_scenario(raw_df, args.output, args.min_seconds, args.max_seconds)
@@ -1624,7 +1606,7 @@ def main():
 	# plot_corrections(raw_df, args.output, args.min_seconds, args.max_seconds)
 
 	df, counts = analyse(raw_df, min_seconds=args.min_seconds, max_seconds=args.max_seconds, keep_only_who_changed_decision=args.keep_only_who_changed_decision, do_balance_treatments=args.balance_treatments, keep_only_who_easily_understood_explanation=args.keep_only_who_easily_understood_explanation)
-	visualize_distribution(df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_decision, args.balance_treatments, keep_only_who_easily_understood_explanation=args.keep_only_who_easily_understood_explanation)
+	visualize_distribution(df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_decision, args.balance_treatments, keep_only_who_easily_understood_explanation=args.keep_only_who_easily_understood_explanation, keep_only_measurable_effects=not args.keep_only_who_changed_decision)
 	plot_mitigation_by_driver(raw_df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_decision, args.balance_treatments)
 	plot_per_scenario_multi(df, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_decision, args.balance_treatments, keep_only_who_easily_understood_explanation=args.keep_only_who_easily_understood_explanation)
 	# plot_reliance_proportions(counts, args.output, args.min_seconds, args.max_seconds, args.keep_only_who_changed_decision, args.balance_treatments, keep_only_who_easily_understood_explanation=args.keep_only_who_easily_understood_explanation)
