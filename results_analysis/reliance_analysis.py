@@ -9,7 +9,8 @@ from matplotlib.ticker import PercentFormatter, MaxNLocator
 from statsmodels.stats.proportion import proportions_ztest
 from statsmodels.stats.power import TTestIndPower, NormalIndPower, GofChisquarePower
 import statsmodels.stats.api as sms
-from scipy.stats import chi2_contingency, fisher_exact, mannwhitneyu, spearmanr
+from scipy.stats import chi2_contingency, chi2, fisher_exact, mannwhitneyu, spearmanr
+from statsmodels.stats.proportion import confint_proportions_2indep
 import numpy as np
 from matplotlib.lines import Line2D
 
@@ -351,7 +352,7 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 
 	x = np.arange(len(scenarios))
 	width = 0.3
-	width_per_scenario = 2.5
+	width_per_scenario = 2.55
 	fig, axes = plt.subplots(1, 3, figsize=(len(scenarios) * width_per_scenario, 4), sharey=True)
 
 	expl_colors = {False: 'C0', True: 'C1'}
@@ -390,63 +391,105 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 							)
 				bottom += vals
 		# p-value annotation via Mann–Whitney U
+		# p-value annotation via Mann–Whitney U + parallel chi-square CI for Δp
 		p_vals = {}
 		_tt_power = TTestIndPower()
-		alpha = 0.05  # or whatever you're using
+		alpha = 0.05
+
 		for scen in scenarios:
 			sub = df_sub[df_sub['Scenario'] == scen]
-			scores_non = sub[sub['Explanation is MAGIX-defined'] == False]['Reliance category'].map(score_map)
-			scores_mag = sub[sub['Explanation is MAGIX-defined'] == True]['Reliance category'].map(score_map)
-			if len(scores_non)>0 and len(scores_mag)>0:
-				# Mann-Whitney U test
-				U, p = mannwhitneyu(scores_non, scores_mag, alternative='greater' if np.mean(scores_non) > np.mean(scores_mag) else 'less')
-				# # Cliff's delta effect size: (2*U)/(n1*n2) - 1
-				# n1, n2 = len(scores_non), len(scores_mag)
-				# delta = (2 * U) / (n1 * n2) - 1
-				# Cohen's d
-				diff = np.mean(scores_mag) - np.mean(scores_non)
+			y = sub['Reliance category'].map(score_map)
+			mask_mag = (sub['Explanation is MAGIX-defined'] == True)
+			mask_non = (sub['Explanation is MAGIX-defined'] == False)
+
+			# Mann–Whitney inputs (same as before)
+			scores_non = y[mask_non]
+			scores_mag = y[mask_mag]
+
+			if len(scores_non) > 0 and len(scores_mag) > 0:
+				# Mann–Whitney U test
+				U, p = mannwhitneyu(
+					scores_non, scores_mag,
+					alternative='greater' if np.mean(scores_non) > np.mean(scores_mag) else 'less'
+				)
+
+				# Cohen's d (same)
+				diff_m = np.mean(scores_mag) - np.mean(scores_non)
 				pooled_var = ((scores_non.var(ddof=1) + scores_mag.var(ddof=1)) / 2)
-				d = diff / np.sqrt(pooled_var) if pooled_var > 0 else np.nan
-				# ---- post-hoc power (approx via two-sample t-test) ----
+				d = diff_m / np.sqrt(pooled_var) if pooled_var > 0 else np.nan
+
+				# Post-hoc power (same semantics as before)
 				n_non, n_mag = len(scores_non), len(scores_mag)
 				power = np.nan
-				if np.isfinite(d) and n_non > 1 and n_mag > 1:
-					if _tt_power is not None:
-						# match direction: d = mean_mag - mean_non
-						ratio = n_non / n_mag
-						alt = 'larger' if d >= 0 else 'smaller'
-						power = _tt_power.power(
-							effect_size=float(d),  # sign matters with 'larger'/'smaller'
-							nobs1=n_mag,           # group1 = MAGIX group (to match d)
-							ratio=ratio,
-							alpha=alpha,
-							alternative=alt
-						)
+				if np.isfinite(d) and n_non > 1 and n_mag > 1 and _tt_power is not None:
+					ratio = n_non / n_mag
+					alt = 'larger' if d >= 0 else 'smaller'
+					power = _tt_power.power(
+						effect_size=float(d),
+						nobs1=n_mag, ratio=ratio, alpha=alpha, alternative=alt
+					)
+
+				# ----- Parallel χ² CI for Δp on the same data -----
+				# Build 2×2: rows = {MAGIX, Non-MAGIX}, cols = {success(+1), failure(-1)}
+				a = int(((mask_mag) & (y == 1)).sum())   # MAGIX successes
+				b = int(((mask_mag) & (y == -1)).sum())  # MAGIX failures
+				c = int(((mask_non) & (y == 1)).sum())   # Non-MAGIX successes
+				d2 = int(((mask_non) & (y == -1)).sum()) # Non-MAGIX failures
+
+				n1 = a + b
+				n0 = c + d2
+				if n1 > 0 and n0 > 0:
+					ci_low, ci_upp = confint_proportions_2indep( # closed-form Wald CI
+						count1=a, nobs1=n1,
+						count2=c, nobs2=n0,
+						method="wald"   # or "score", "exact", "wald-cc", etc.
+					)
+				else:
+					ci_low = ci_upp = np.nan
+
 			else:
 				p = np.nan
-				# delta = np.nan
 				d = np.nan
-				# w = np.nan
 				power = np.nan
-			p_vals[scen] = (p,d, power)
+				ci_low = ci_upp = np.nan
+
+			p_vals[scen] = (p, d, power, ci_low, ci_upp)
+
 		for i, scen in enumerate(scenarios):
-			p_val, d_val, pw_val = p_vals[scen]
+			p_val, d_val, pw_val, rd_lo, rd_hi = p_vals[scen]
 
-			# Bold markers
-			if p_val < 0.01:
+			# p formatting
+			if np.isfinite(p_val) and p_val < 0.01:
 				p_str = r"$\mathbf{p\!<\!0.01}$"
-			else:
-				# format with 3 decimals and drop leading "0"
+			elif np.isfinite(p_val):
 				p_fmt = f"{p_val:.3f}"
-				if p_val < 0.05:
-					p_str = rf"$\mathbf{{p\!=\!{p_fmt}}}$"
-				else:
-					p_str = f"p={p_fmt}"
-			pw_str = rf"$\mathbf{{pw\!=\!{pw_val:.2f}}}$" if pw_val >= 0.795 else f"pw={pw_val:.2f}"
-			d_str = f"(d={d_val:.2f})"
+				p_str = rf"$\mathbf{{p\!=\!{p_fmt}}}$" if p_val < 0.05 else f"p={p_fmt}"
+			else:
+				p_str = "p=NA"
 
-			# Combine with newlines
-			text_str = f"{p_str}\n{pw_str}\n{d_str}".replace(' ','')
+			# power formatting
+			if np.isfinite(pw_val):
+				pw_str = rf"$\mathbf{{pw\!=\!{pw_val:.2f}}}$" if pw_val >= 0.795 else f"pw={pw_val:.2f}"
+			else:
+				pw_str = "pw=NA"
+
+			# closed-form χ² CI for Δp shown right under pw
+			if np.isfinite(rd_lo) and np.isfinite(rd_hi):
+				# format numbers without leading 0
+				fmt = lambda v: f"{v:.2f}".lstrip("0") if v >= 0 else f"-{abs(v):.2f}".lstrip("0")
+				lo_str, hi_str = fmt(rd_lo), fmt(rd_hi)
+				ci_str = f"[{lo_str},{hi_str}]"
+
+				# # bold if interval excludes 0
+				# if rd_lo > 0 or rd_hi < 0:
+				# 	ci_str = rf"$\mathbf{{{ci_str}}}$".replace('-','-\!').replace(' ','\!').replace(',','\!,\!')
+			else:
+				ci_str = "[NA]"
+
+			d_str = f"(d={d_val:.2f})" if np.isfinite(d_val) else "(d=NA)"
+
+			# Put CI on the line immediately under pw
+			text_str = f"{p_str}\n{pw_str}\n{ci_str}\n{d_str}".replace(' ', '')
 
 			ax.text(
 				x[i], 1.1, text_str,
@@ -461,7 +504,7 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 		if ax is axes[0]:
 			ax.set_ylabel('Proportion within explanation type', fontsize=9)
 			ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-		ax.set_ylim(0, 1.3)
+		ax.set_ylim(0, 1.4)
 		# ax.yaxis.set_major_locator(MaxNLocator(5))
 		ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0]) # Force ticks only up to 1.0
 		ax.tick_params(axis='y', labelsize=9)
@@ -576,33 +619,25 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 	if "Reliance category" not in d.columns:
 		d["Reliance category"] = d.apply(label_reliance, axis=1)
 
-	if keep_only_who_changed_decision: # Keep only who actually updated their decision after receiving the explanation
+	if keep_only_who_changed_decision:  # Keep only who actually updated their decision
 		old_len = len(d)
 		d = d[(d["Explanation changed mind"] == True)]
-		if old_len-len(d):
+		if old_len - len(d):
 			print(f'<analyse::changed_mind_only> Dropped entries: {old_len-len(d)}/{old_len} ({100*(old_len-len(d))/old_len:.2f}%)')
-	else: # Keep only who actually used the explanations, updating their mental model
+	else:
 		old_len = len(d)
-
 		lower_quartile = d['Total approvals'].quantile(0.25)
 		d = d[
 			(
 				(d["Explanation changed mind"] == True) |
 				(
-					# (d["How confident are you in the decision you made? (without explanation)"] != d["How confident are you in the decision you made? (with explanation)"]) &
-					# (d["Did the explanation help you evaluate the AI's output?"] >= 1) &
 					(d["How useful was the explanation provided?"] >= 1) &
-					(d['Total approvals'] >= min(495,lower_quartile))
+					(d['Total approvals'] >= min(495, lower_quartile))
 				)
 			)
 		]
-		if old_len-len(d):
+		if old_len - len(d):
 			print(f'<analyse::measurable_effect_filter> Dropped entries: {old_len-len(d)}/{old_len} ({100*(old_len-len(d))/old_len:.2f}%)')
-
-		# old_len = len(d)
-		# d = d[(d['Total approvals'] >= 400)]
-		# if old_len-len(d):
-		# 	print(f'<analyse::high_approval_rate_filter> Dropped entries: {old_len-len(d)}/{old_len} ({100*(old_len-len(d))/old_len:.2f}%)')
 
 	if not do_balance_treatments:
 		d = balance_treatments(d)
@@ -613,7 +648,6 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 	drivers = [
 		("How easy was it to understand the explanation?", "Expl. Clarity", "Ease"),
 		("How confident are you in the decision you made? (with explanation)", "Confidence after Expl.", "Confidence_after"),
-		# ("How confident are you in the decision you made? (without explanation)", "Confidence before Expl.", "Confidence_before"),
 		("Did the explanation help you evaluate the AI's output?", "Expl. Helpfulness", "Helpfulness"),
 		("How useful was the explanation provided?", "Expl. Usefulness", "Usefulness"),
 		("How much effort did it take to understand and complete this task?", "Effort", "Effort"),
@@ -624,7 +658,7 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 		s = pd.to_numeric(series, errors="coerce")
 		return (s + 1).round().astype("Int64")
 
-	# Helper: compute mitigation tables/rates
+	# Helper: compute tables (kept as in your original plot code)
 	def mitigation_series(data, expected, appropriate_label, error_label):
 		sub = data[data["Expected answer"] == expected]
 		tab = (
@@ -635,8 +669,7 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 		for col in (appropriate_label, error_label):
 			if col not in tab.columns:
 				tab[col] = 0
-		# den = tab[appropriate_label] + tab[error_label]
-		# rate = (tab[appropriate_label] / den).replace([np.inf, np.nan], np.nan)
+		# Keep your current y-values behavior (counts)
 		rate = tab[appropriate_label].replace([np.inf, np.nan], np.nan)
 		return rate, tab  # also return counts
 
@@ -649,17 +682,15 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 		raise ValueError("None of the specified driver columns contain data to plot.")
 
 	ncols = len(valid_drivers)
-	fig, axes = plt.subplots(nrows=2, ncols=ncols, figsize=(3.4 * ncols, 3.7), sharex=True, sharey=True)
+	fig, axes = plt.subplots(nrows=2, ncols=ncols, figsize=(3. * ncols, 4.2), sharex=True, sharey=True)
 	axes = np.atleast_2d(axes)
 
-	_norm_power = NormalIndPower()
-	alpha = 0.05  # or whatever you're using
 	for c, (col, x_label, stub) in enumerate(valid_drivers):
 		d_sub = d[pd.notna(d[col])].copy()
 		d_sub["Scale"] = to_one_to_five(d_sub[col])
 		d_sub = d_sub[pd.notna(d_sub["Scale"])]
 
-		# Build rates and counts
+		# Build counts for plotting
 		over_rate, over_counts = mitigation_series(
 			d_sub, expected="Reject",
 			appropriate_label="Appropriate reject",
@@ -673,125 +704,116 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 
 		levels = sorted([int(v) for v in d_sub["Scale"].dropna().unique()])
 		panels = [
-			(axes[0, c], over_rate, over_counts, "Appropriate reject", "Over-reliance"),
-			(axes[1, c], under_rate, under_counts, "Appropriate accept", "Under-reliance"),
+			(axes[0, c], over_rate, over_counts, "Appropriate reject", "Over-reliance", "Reject"),
+			(axes[1, c], under_rate, under_counts, "Appropriate accept", "Under-reliance", "Accept"),
 		]
 
-		for ax, rate, counts, appr_label, err_label in panels:
-			# Compute per-level p-values
-			p_values = {}
-			for e in levels:
-				try:
-					cnt0 = counts.loc[(False, e)][appr_label]
-					tot0 = counts.loc[(False, e)][appr_label] + counts.loc[(False, e)][err_label]
-				except KeyError:
-					cnt0, tot0 = 0, 0
-				try:
-					cnt1 = counts.loc[(True, e)][appr_label]
-					tot1 = counts.loc[(True, e)][appr_label] + counts.loc[(True, e)][err_label]
-				except KeyError:
-					cnt1, tot1 = 0, 0
-				if tot0 > 0 and tot1 > 0:
-					_, pval = proportions_ztest([cnt0, cnt1], [tot0, tot1])
-					effect = sms.proportion_effectsize(cnt1 / tot1, cnt0 / tot0)
-					# Total sample size
-					alpha = 0.05
-					power = _norm_power.power(effect_size=effect, nobs1=tot0, alpha=alpha, ratio=tot1/tot0)
-				else:
-					pval = np.nan
-					effect = np.nan
-					power = np.nan
-				p_values[e] = (pval, power, effect)
-
-			# Plot lines and annotate counts and p-values
+		for ax, rate, counts, appr_label, err_label, expected_lbl in panels:
+			# Plot MAGIX vs Non-MAGIX lines (counts per level as in your current figure)
 			y_values = {}
-			# Keep track of previous annotation positions at each x
 			annot_positions = {}
 			for magix_flag, label, marker in [(False, "Non-MAGIX", "o"), (True, "MAGIX", "s")]:
 				series = rate.loc[magix_flag] if (magix_flag in rate.index.get_level_values(0)) else pd.Series(dtype=float)
 				y = [series.get(e, np.nan) for e in levels]
 				y_values[magix_flag] = y
 				ln, = ax.plot(levels, y, marker=marker, label=label)
-				
+
 				# N annotations
 				for idx, e in enumerate(levels):
 					N = 0
 					if (magix_flag, e) in counts.index:
-						N = int(counts.loc[(magix_flag, e)][appr_label] + counts.loc[(magix_flag, e)][err_label])
+						N = int(counts.loc[(magix_flag, e)][appr_label])
 					yv = y[idx]
 					if np.isfinite(yv):
-						# Default offset
 						y_offset = 4
-
-						# If we already annotated something close at this x, move it higher
 						if e in annot_positions:
 							if 0 <= yv - annot_positions[e] < 0.05:
-								y_offset += 10   # push higher if overlap
+								y_offset += 10
 							elif -0.05 < yv - annot_positions[e] < 0:
-								y_offset -= 10   # push higher if overlap
-
-						# Store position
+								y_offset -= 10
 						annot_positions[e] = yv
-
 						ax.annotate(
 							f"N={N}", (e, yv), xytext=(0, y_offset), textcoords="offset points",
 							ha="center", va="bottom", fontsize=7,
-							color=ln.get_color(),   # match line color
+							color=ln.get_color(),
 							bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.9)
 						)
 
-			# P-value annotations
-			for e in levels:
-				pval, power, effect = p_values.get(e, (np.nan, np.nan, np.nan))
-				if np.isfinite(pval) and pval < 0.05:
-					y0 = y_values.get(False, [np.nan] * len(levels))[levels.index(e)]
-					y1 = y_values.get(True,  [np.nan] * len(levels))[levels.index(e)]
-					y_max = max([yv for yv in (y0, y1) if np.isfinite(yv)] + [0])
-					# Bold markers
-					if pval < 0.01:
-						p_str = r"$\mathbf{p\!<\!0.01}$"
-					else:
-						# format with 3 decimals and drop leading "0"
-						p_fmt = f"{pval:.3f}"
-						if pval < 0.05:
-							p_str = rf"$\mathbf{{p\!=\!{p_fmt}}}$"
-						else:
-							p_str = f"p={p_fmt}"
-					pw_str = rf"$\mathbf{{pw\!=\!{power:.2f}}}$" if power >= 0.795 else f"pw={power:.2f}"
-					d_str = f"(h={effect:.2f})"
+			# === NEW: Spearman correlation on the AGGREGATED LINE (Scale vs mitigated COUNT) ===
+			stats = {}
+			for magix_flag, gname in [(True, "MAGIX"), (False, "non")]:
+				xs, ys = [], []
+				for e in levels:
+					if (magix_flag, e) in counts.index:
+						appr = counts.loc[(magix_flag, e)][appr_label]
+						err  = counts.loc[(magix_flag, e)][err_label]
+						tot  = appr + err
+						if tot > 0:
+							xs.append(e)
+							ys.append(float(appr))  # count of mitigated at this level
+				if len(xs) >= 2:
+					rho, pval = spearmanr(xs, ys, nan_policy="omit")
+				else:
+					rho, pval = (np.nan, np.nan)
+				stats[gname] = (rho, pval, len(xs))
+				
 
-					# Combine with newlines
-					text_str = f"{p_str}\n{pw_str}\n{d_str}".replace(' ','')
-					ax.annotate(
-						text_str, (e, y_max + 0.01),
-						xytext=(0, 12), textcoords="offset points",
-						ha="center", va="bottom", fontsize=8,
-						bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.9)
-					)
+			# Add a compact stats legend (same style as your other plot)
+			proxy = Line2D([], [], linestyle='')
+			handles = [proxy]
+			sM = stats["MAGIX"]; sN = stats["non"]
+			# Find MAGIX and Non-MAGIX lines on this axis
+			line_colors = {}
+			for line, label in zip(ax.get_lines(), [l.get_label() for l in ax.get_lines()]):
+				if label == 'Non-MAGIX':
+					line_colors["non"] = line.get_color()
+				elif label == "MAGIX":
+					line_colors["MAGIX"] = line.get_color()
 
-			# ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-			# ax.set_ylim(0, 1.1)
-			ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+			handles = [Line2D([], [], linestyle=''), Line2D([], [], linestyle='')]
+			labels  = [
+				f"$\\rho_{{\\mathrm{{MAGIX}}}}$={fmt(sM[0])}{star(sM[1])} ({'p<0.01' if sM[1] < 0.01 else f'''p={fmt(sM[1], 2)}'''})", 
+				f"$\\rho_{{\\mathrm{{non}}}}$={fmt(sN[0])}{star(sN[1])} ({'p<0.01' if sN[1] < 0.01 else f'''p={fmt(sN[1], 2)}'''})"
+			]
+			leg_stats = ax.legend(
+				handles, labels,
+				loc='upper left',
+				bbox_to_anchor=(0.01, 0.99),
+				borderaxespad=0.2,
+				handlelength=0,
+				handletextpad=0,
+				frameon=True, framealpha=0.33, fancybox=True,
+				fontsize=6
+			)
+			# --- Recolor each legend entry individually ---
+			for text, key in zip(leg_stats.get_texts(), ["MAGIX", "non"]):
+				if key in line_colors:
+					text.set_color(line_colors[key])
+			ax.add_artist(leg_stats)
+			# ====================================================================
+
+			# ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+			ax.tick_params(axis="y", labelsize=8)
+			ax.tick_params(axis="x", labelsize=8)
 
 		# Only bottom row shows x-axis labels
-		# axes[0, c].set_xlabel(x_label)
-		axes[1, c].set_xlabel(x_label)
+		axes[1, c].set_xlabel(x_label, fontsize=9)
 
 		# Only left column shows y-axis label
 		if c == 0:
-			axes[0, 0].set_ylabel("Appropriate\nrejections", rotation=90)
-			axes[1, 0].set_ylabel("Appropriate\nacceptances", rotation=90)
+			axes[0, 0].set_ylabel("Appropriate\nrejections", rotation=90, fontsize=9)
+			axes[1, 0].set_ylabel("Appropriate\nacceptances", rotation=90, fontsize=9)
 
-	# One shared legend (top-right outside the grid)
-	axes[0,-1].legend(
-		title="Explanation type",
-		loc='upper right',
-		frameon=True,
-		fontsize=8,          # legend labels
-		title_fontsize=8     # legend title
-	)
+	# # One shared legend (top-right outside the grid)
+	# axes[0, -1].legend(
+	# 	title="Explanation type",
+	# 	loc='upper right',
+	# 	frameon=True,
+	# 	fontsize=8,
+	# 	title_fontsize=8
+	# )
 
-	plt.tight_layout()  # leave room for the legend
+	plt.subplots_adjust(wspace=0.1, hspace=0.1)
 	os.makedirs(out_dir, exist_ok=True)
 	fname = (
 		f"appropriateness_counts_by_ALL_DRIVERS-s={min_seconds}_{max_seconds}"
@@ -917,8 +939,8 @@ def plot_reliance_vs_trust_attitude_effort(df, out_dir, min_seconds=None, max_se
 				labels = []
 				s = stats
 				labels.append(
-					f"$\\rho_{{\\mathrm{{over}}}}$={fmt(s['rho_over'])}{star(s['p_over'])} (p={fmt(s['p_over'], 2)})\n"
-					f"$\\rho_{{\\mathrm{{under}}}}$={fmt(s['rho_under'])}{star(s['p_under'])} (p={fmt(s['p_under'], 2)})"
+					f"$\\rho_{{\\mathrm{{over}}}}$={fmt(s['rho_over'])}{star(s['p_over'])} ({'p<0.01' if s['p_over'] < 0.01 else f'''p={fmt(s['p_over'], 2)}'''})\n"
+					f"$\\rho_{{\\mathrm{{under}}}}$={fmt(s['rho_under'])}{star(s['p_under'])} ({'p<0.01' if s['p_under'] < 0.01 else f'''p={fmt(s['p_under'], 2)}'''})"
 				)
 
 				leg_stats = ax.legend(
@@ -1099,8 +1121,8 @@ def plot_reliance_vs_trust_attitude_effort_by_scenario(df, out_dir, min_seconds=
 						s = stats[label]
 						labels.append(
 							f"{label}:\n"
-							f"\t$\\rho_{{\\mathrm{{over}}}}$={fmt(s['rho_over'])}{star(s['p_over'])} (p={fmt(s['p_over'], 2)})\n"
-							f"\t$\\rho_{{\\mathrm{{under}}}}$={fmt(s['rho_under'])}{star(s['p_under'])} (p={fmt(s['p_under'], 2)})"
+							f"$\\rho_{{\\mathrm{{over}}}}$={fmt(s['rho_over'])}{star(s['p_over'])} ({'p<0.01' if s['p_over'] < 0.01 else f'''p={fmt(s['p_over'], 2)}'''})\n"
+							f"$\\rho_{{\\mathrm{{under}}}}$={fmt(s['rho_under'])}{star(s['p_under'])} ({'p<0.01' if s['p_under'] < 0.01 else f'''p={fmt(s['p_under'], 2)}'''})"
 						)
 
 					leg_stats = ax.legend(
@@ -1301,7 +1323,7 @@ def plot_effort_distribution(df, out_dir, min_seconds=None, max_seconds=None, cm
 		patch.set_alpha(0.8)
 
 	# Axes labels and title styling
-	ax.set_title('Effort Distribution by Scenario', fontsize=16, fontweight='bold')
+	# ax.set_title('Effort Distribution by Scenario', fontsize=16, fontweight='bold')
 	ax.set_xlabel('')
 	ax.set_ylabel('Effort (1-5)', fontsize=14)
 	ax.tick_params(axis='x', labelrotation=0, labelsize=10)

@@ -276,10 +276,12 @@ def get_scenario_rows(log_files, special_task_label=None):
 	for path in sorted(log_files):
 		records = read_log_records(path)
 		if not records:
+			print('Invalid file:',path)
 			continue
 
 		latest_idx = find_latest_prolific_idx(records)
 		if latest_idx is None:
+			print('Invalid file:',path)
 			continue
 
 		prolific_id_value = records[latest_idx][2]
