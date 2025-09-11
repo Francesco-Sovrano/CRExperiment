@@ -9,10 +9,11 @@ from matplotlib.ticker import PercentFormatter, MaxNLocator
 from statsmodels.stats.proportion import proportions_ztest
 from statsmodels.stats.power import TTestIndPower, NormalIndPower, GofChisquarePower
 import statsmodels.stats.api as sms
-from scipy.stats import chi2_contingency, chi2, fisher_exact, mannwhitneyu, spearmanr
-from statsmodels.stats.proportion import confint_proportions_2indep
+from scipy.stats import chi2_contingency, fisher_exact, mannwhitneyu, spearmanr
 import numpy as np
 from matplotlib.lines import Line2D
+from scipy.stats import bootstrap
+import math
 
 SHOW_ALL_FIGURES = False
 
@@ -42,8 +43,7 @@ HATCHES = {
 scenario_name_map = {
 	'Scenario 2easy': {'all':'Q2','image_based':'Q2'},
 	'Scenario 2hard': {'all':'Q2','image_based':'Q2-Hard'},
-	'Scenario 2bis': {'all':'Q4','text_based':'Q2→Q4'},
-	# 'Scenario 2bis': 'Q4',
+	'Scenario 2bis': {'all':'Q3','text_based':'Q2→Q3'},
 	'Scenario 2': 'Q2',
 	'Scenario 1': 'Q1',
 	'Scenario 3': 'Q3',
@@ -152,6 +152,7 @@ def filter_invalid_rows(df, _input):
 	# df = df[df["Prolific ID"].str.len() >= 23]
 	# Keep only valid changes of mind
 	df = df[~df["What made you change your decision?"].str.contains(r"(n't| not) change", case=False, na=False)]
+	df = df[~df["What made you change your decision?"].str.contains(r"Google", case=False, na=False)]
 	# For any rows sharing both the same Prolific ID and the same Scenario, keep only the last occurrence.
 	df["Scenario"] = df.apply(lambda row: tidy_task(row["Task file"], _input.split('/')[-1]), axis=1)
 	df["Reliance category"] = df.apply(label_reliance, axis=1)
@@ -201,7 +202,14 @@ def analyse(df, min_seconds=None, max_seconds=None, keep_only_who_changed_decisi
 			print(f'<analyse::changed_mind_only> Dropped entries: {old_len-len(df)}/{old_len} ({100*(old_len-len(df))/old_len:.2f}%)')
 	else: # Keep only who actually used the explanations, updating their mental model
 		old_len = len(df)
-		# lower_quartile = df['Total approvals'].quantile(0.25)
+		# Keep only participants with a higher approval rate, as they are less likely to have answered the usefulness question poorly
+		lower_quartile = df['Total approvals'].quantile(0.25)
+		print('Lower quartile of total approvals', min(470,lower_quartile)) # 470 is about the global median
+		old_len = len(df)
+		df = df[(df['Total approvals'] >= lower_quartile)]
+		if old_len-len(df):
+			print(f'<analyse::high_approval_rate_filter> Dropped entries: {old_len-len(df)}/{old_len} ({100*(old_len-len(df))/old_len:.2f}%)')
+
 		df = df[
 			(
 				(df["Explanation changed mind"] == True) |
@@ -210,14 +218,6 @@ def analyse(df, min_seconds=None, max_seconds=None, keep_only_who_changed_decisi
 		]
 		if old_len-len(df):
 			print(f'<analyse::measurable_effect_filter> Dropped entries: {old_len-len(df)}/{old_len} ({100*(old_len-len(df))/old_len:.2f}%)')
-
-		# Keep only participants with a higher approval rate, as they are less likely to have answered the usefulness question poorly
-		lower_quartile = df['Total approvals'].quantile(0.25)
-		print('Lower quartile of total approvals', lower_quartile)
-		old_len = len(df)
-		df = df[(df['Total approvals'] >= min(400,lower_quartile))] # 400 is close to the median of the global distribution; here the quantile is computed on a slice of that data
-		if old_len-len(df):
-			print(f'<analyse::high_approval_rate_filter> Dropped entries: {old_len-len(df)}/{old_len} ({100*(old_len-len(df))/old_len:.2f}%)')
 
 	# df = df[(df["How confident are you in the decision you made? (without explanation)"] < df["How confident are you in the decision you made? (with explanation)"])]
 	# df = df[df["Explanation changed mind"]]
@@ -352,7 +352,7 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 
 	x = np.arange(len(scenarios))
 	width = 0.3
-	width_per_scenario = 2.55
+	width_per_scenario = 2.5
 	fig, axes = plt.subplots(1, 3, figsize=(len(scenarios) * width_per_scenario, 4), sharey=True)
 
 	expl_colors = {False: 'C0', True: 'C1'}
@@ -390,7 +390,6 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 								bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='none', alpha=0.9)
 							)
 				bottom += vals
-		# p-value annotation via Mann–Whitney U
 		# p-value annotation via Mann–Whitney U + parallel chi-square CI for Δp
 		p_vals = {}
 		_tt_power = TTestIndPower()
@@ -402,18 +401,49 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 			mask_mag = (sub['Explanation is MAGIX-defined'] == True)
 			mask_non = (sub['Explanation is MAGIX-defined'] == False)
 
-			# Mann–Whitney inputs (same as before)
+			# Mann–Whitney inputs
 			scores_non = y[mask_non]
 			scores_mag = y[mask_mag]
 
 			if len(scores_non) > 0 and len(scores_mag) > 0:
-				# Mann–Whitney U test
+				alternative = 'greater' if np.mean(scores_mag) > np.mean(scores_non) else 'less'
 				U, p = mannwhitneyu(
-					scores_non, scores_mag,
-					alternative='greater' if np.mean(scores_non) > np.mean(scores_mag) else 'less'
+					scores_mag, scores_non,
+					alternative=alternative
 				)
+				A = U / (len(scores_non) * len(scores_mag)) # common-language effect = P(X>Y) + 0.5 P(X=Y)
+				rank_biserial_correlation = 2 * A - 1 # rank-biserial correlation
 
-				# Cohen's d (same)
+				def rbc_stat(x, y):
+					"""
+					Rank-biserial correlation for X vs Y.
+					Uses U_x (i.e., 'greater') so RBC > 0 when X tends to be larger than Y.
+					"""
+					n1, n2 = len(x), len(y)
+					# U for the first sample (X). For 'two-sided' SciPy returns min(Ux,Uy), so use 'greater'.
+					u = mannwhitneyu(x, y, alternative=alternative).statistic
+					A = u / (n1 * n2)          # common-language effect = P(X>Y) + 0.5 P(X=Y)
+					rbc = 2 * A - 1            # rank-biserial correlation
+					return rbc
+
+				# BCa 95% CI with nonparametric groupwise resampling
+				try:
+					res = bootstrap(
+						data=(scores_mag, scores_non),
+						statistic=rbc_stat,
+						vectorized=False,          # rbc_stat expects 1D arrays, not stacked
+						paired=False,              # resample the two groups independently
+						n_resamples=5000,
+						method="BCa",              # <-- bias-corrected and accelerated
+						confidence_level=0.95,
+						random_state=42,
+					)
+					ci_low, ci_upp = res.confidence_interval.low, res.confidence_interval.high
+				except Exception as e:
+					ci_low = ci_upp = np.nan
+				# ci_low = ci_upp = np.nan
+				
+				# Cohen's d
 				diff_m = np.mean(scores_mag) - np.mean(scores_non)
 				pooled_var = ((scores_non.var(ddof=1) + scores_mag.var(ddof=1)) / 2)
 				d = diff_m / np.sqrt(pooled_var) if pooled_var > 0 else np.nan
@@ -422,45 +452,26 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 				n_non, n_mag = len(scores_non), len(scores_mag)
 				power = np.nan
 				if np.isfinite(d) and n_non > 1 and n_mag > 1 and _tt_power is not None:
-					ratio = n_non / n_mag
+					ratio = n_mag / n_non
 					alt = 'larger' if d >= 0 else 'smaller'
 					power = _tt_power.power(
 						effect_size=float(d),
-						nobs1=n_mag, ratio=ratio, alpha=alpha, alternative=alt
+						nobs1=n_non, ratio=ratio, alpha=alpha, alternative=alt
 					)
-
-				# ----- Parallel χ² CI for Δp on the same data -----
-				# Build 2×2: rows = {MAGIX, Non-MAGIX}, cols = {success(+1), failure(-1)}
-				a = int(((mask_mag) & (y == 1)).sum())   # MAGIX successes
-				b = int(((mask_mag) & (y == -1)).sum())  # MAGIX failures
-				c = int(((mask_non) & (y == 1)).sum())   # Non-MAGIX successes
-				d2 = int(((mask_non) & (y == -1)).sum()) # Non-MAGIX failures
-
-				n1 = a + b
-				n0 = c + d2
-				if n1 > 0 and n0 > 0:
-					ci_low, ci_upp = confint_proportions_2indep( # closed-form Wald CI
-						count1=a, nobs1=n1,
-						count2=c, nobs2=n0,
-						method="wald"   # or "score", "exact", "wald-cc", etc.
-					)
-				else:
-					ci_low = ci_upp = np.nan
-
 			else:
 				p = np.nan
-				d = np.nan
+				rank_biserial_correlation = np.nan
 				power = np.nan
 				ci_low = ci_upp = np.nan
 
-			p_vals[scen] = (p, d, power, ci_low, ci_upp)
+			p_vals[scen] = (p, rank_biserial_correlation, power, ci_low, ci_upp)
 
 		for i, scen in enumerate(scenarios):
 			p_val, d_val, pw_val, rd_lo, rd_hi = p_vals[scen]
 
 			# p formatting
-			if np.isfinite(p_val) and p_val < 0.01:
-				p_str = r"$\mathbf{p\!<\!0.01}$"
+			if np.isfinite(p_val) and p_val < 0.001:
+				p_str = r"$\mathbf{p\!<\!0.001}$"
 			elif np.isfinite(p_val):
 				p_fmt = f"{p_val:.3f}"
 				p_str = rf"$\mathbf{{p\!=\!{p_fmt}}}$" if p_val < 0.05 else f"p={p_fmt}"
@@ -476,7 +487,7 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 			# closed-form χ² CI for Δp shown right under pw
 			if np.isfinite(rd_lo) and np.isfinite(rd_hi):
 				# format numbers without leading 0
-				fmt = lambda v: f"{v:.2f}".lstrip("0") if v >= 0 else f"-{abs(v):.2f}".lstrip("0")
+				fmt = lambda v: f"{v:.2f}"#.lstrip("0") if v >= 0 else '-'+f"{abs(v):.2f}".lstrip("0")
 				lo_str, hi_str = fmt(rd_lo), fmt(rd_hi)
 				ci_str = f"[{lo_str},{hi_str}]"
 
@@ -486,10 +497,10 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 			else:
 				ci_str = "[NA]"
 
-			d_str = f"(d={d_val:.2f})" if np.isfinite(d_val) else "(d=NA)"
+			d_str = f"$r_{{rb}}={d_val:.2f}$" if np.isfinite(d_val) else "r_{{rb}}=NA)"
 
 			# Put CI on the line immediately under pw
-			text_str = f"{p_str}\n{pw_str}\n{ci_str}\n{d_str}".replace(' ', '')
+			text_str = f"{p_str}\n{d_str}\n{ci_str}".replace(' ', '')
 
 			ax.text(
 				x[i], 1.1, text_str,
@@ -504,7 +515,7 @@ def plot_per_scenario_multi(df, out_dir, min_seconds=None, max_seconds=None, kee
 		if ax is axes[0]:
 			ax.set_ylabel('Proportion within explanation type', fontsize=9)
 			ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-		ax.set_ylim(0, 1.4)
+		ax.set_ylim(0, 1.3)
 		# ax.yaxis.set_major_locator(MaxNLocator(5))
 		ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0]) # Force ticks only up to 1.0
 		ax.tick_params(axis='y', labelsize=9)
@@ -625,15 +636,17 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 		if old_len - len(d):
 			print(f'<analyse::changed_mind_only> Dropped entries: {old_len-len(d)}/{old_len} ({100*(old_len-len(d))/old_len:.2f}%)')
 	else:
-		old_len = len(d)
 		lower_quartile = d['Total approvals'].quantile(0.25)
+		old_len = len(d)
+		d = d[(d['Total approvals'] >= min(470,lower_quartile))] # 470 is about the global median
+		if old_len-len(d):
+			print(f'<analyse::high_approval_rate_filter> Dropped entries: {old_len-len(d)}/{old_len} ({100*(old_len-len(d))/old_len:.2f}%)')
+
+		old_len = len(d)
 		d = d[
 			(
 				(d["Explanation changed mind"] == True) |
-				(
-					(d["How useful was the explanation provided?"] >= 1) &
-					(d['Total approvals'] >= min(495, lower_quartile))
-				)
+				(d["How useful was the explanation provided?"] >= 1) 
 			)
 		]
 		if old_len - len(d):
@@ -772,8 +785,8 @@ def plot_mitigation_by_driver(df, out_dir, min_seconds=None, max_seconds=None, k
 
 			handles = [Line2D([], [], linestyle=''), Line2D([], [], linestyle='')]
 			labels  = [
-				f"$\\rho_{{\\mathrm{{MAGIX}}}}$={fmt(sM[0])}{star(sM[1])} ({'p<0.01' if sM[1] < 0.01 else f'''p={fmt(sM[1], 2)}'''})", 
-				f"$\\rho_{{\\mathrm{{non}}}}$={fmt(sN[0])}{star(sN[1])} ({'p<0.01' if sN[1] < 0.01 else f'''p={fmt(sN[1], 2)}'''})"
+				f"$\\rho_{{\\mathrm{{MAGIX}}}}$={fmt(sM[0])}{star(sM[1])} ({'p<0.001' if sM[1] < 0.001 else f'''p={fmt(sM[1], 2)}'''})", 
+				f"$\\rho_{{\\mathrm{{non}}}}$={fmt(sN[0])}{star(sN[1])} ({'p<0.001' if sN[1] < 0.001 else f'''p={fmt(sN[1], 2)}'''})"
 			]
 			leg_stats = ax.legend(
 				handles, labels,
@@ -939,8 +952,8 @@ def plot_reliance_vs_trust_attitude_effort(df, out_dir, min_seconds=None, max_se
 				labels = []
 				s = stats
 				labels.append(
-					f"$\\rho_{{\\mathrm{{over}}}}$={fmt(s['rho_over'])}{star(s['p_over'])} ({'p<0.01' if s['p_over'] < 0.01 else f'''p={fmt(s['p_over'], 2)}'''})\n"
-					f"$\\rho_{{\\mathrm{{under}}}}$={fmt(s['rho_under'])}{star(s['p_under'])} ({'p<0.01' if s['p_under'] < 0.01 else f'''p={fmt(s['p_under'], 2)}'''})"
+					f"$\\rho_{{\\mathrm{{over}}}}$={fmt(s['rho_over'])}{star(s['p_over'])} ({'p<0.001' if s['p_over'] < 0.001 else f'''p={fmt(s['p_over'], 2)}'''})\n"
+					f"$\\rho_{{\\mathrm{{under}}}}$={fmt(s['rho_under'])}{star(s['p_under'])} ({'p<0.001' if s['p_under'] < 0.001 else f'''p={fmt(s['p_under'], 2)}'''})"
 				)
 
 				leg_stats = ax.legend(
@@ -1121,8 +1134,8 @@ def plot_reliance_vs_trust_attitude_effort_by_scenario(df, out_dir, min_seconds=
 						s = stats[label]
 						labels.append(
 							f"{label}:\n"
-							f"$\\rho_{{\\mathrm{{over}}}}$={fmt(s['rho_over'])}{star(s['p_over'])} ({'p<0.01' if s['p_over'] < 0.01 else f'''p={fmt(s['p_over'], 2)}'''})\n"
-							f"$\\rho_{{\\mathrm{{under}}}}$={fmt(s['rho_under'])}{star(s['p_under'])} ({'p<0.01' if s['p_under'] < 0.01 else f'''p={fmt(s['p_under'], 2)}'''})"
+							f"$\\rho_{{\\mathrm{{over}}}}$={fmt(s['rho_over'])}{star(s['p_over'])} ({'p<0.001' if s['p_over'] < 0.001 else f'''p={fmt(s['p_over'], 2)}'''})\n"
+							f"$\\rho_{{\\mathrm{{under}}}}$={fmt(s['rho_under'])}{star(s['p_under'])} ({'p<0.001' if s['p_under'] < 0.001 else f'''p={fmt(s['p_under'], 2)}'''})"
 						)
 
 					leg_stats = ax.legend(
@@ -1274,10 +1287,6 @@ def plot_effort_reliance_by_scenario(df, out_dir, min_seconds=None, max_seconds=
 	print(f"Saved figure to: {out_path}")
 
 def plot_effort_distribution(df, out_dir, min_seconds=None, max_seconds=None, cmap_name='Set3'):
-	"""
-	Improved boxplot of 'How much effort...' Likert responses by scenario,
-	using a light pastel colormap and readable annotation backgrounds.
-	"""
 	# Filter and prepare data
 	effort_col = "How much effort did it take to understand and complete this task?"
 	d = df.copy()
@@ -1334,10 +1343,10 @@ def plot_effort_distribution(df, out_dir, min_seconds=None, max_seconds=None, cm
 	# Annotate stats with white background boxes
 	ymin, ymax = ax.get_ylim()
 	span = ymax - ymin
-	offsets = {'q1': span * 0.02, 'med': span * 0.05, 'q3': span * 0.08, 'mean': span * 0.11}
+	offsets = {'q1': span * 0.02, 'med': span * 0.02, 'q3': span * 0.02, 'mean': span * 0.02}
 	for i, sc in enumerate(scenarios, start=1):
 		s = stats[sc]
-		for key, style in zip(['q1','med','q3','mean'], ['Q1','Med','Q3','Mean']):
+		for key, style in zip(['mean'], ['Mean']):
 			y_val = s[key] + offsets[key]
 			ax.text(
 				i,
@@ -1354,7 +1363,86 @@ def plot_effort_distribution(df, out_dir, min_seconds=None, max_seconds=None, cm
 	out_path = os.path.join(out_dir, f"effort_distribution-s={min_seconds}_{max_seconds}.pdf")
 	plt.savefig(out_path)
 	if SHOW_ALL_FIGURES: plt.show()
-	print(f"Saved improved effort distribution plot to {out_path}")
+	print(f"Saved effort distribution plot to {out_path}")
+
+def plot_time_distribution(df, out_dir, min_seconds=None, max_seconds=None, cmap_name='Set3'):
+	# Filter and prepare data
+	time_col = "Seconds"
+	d = df.copy()
+	d = d[d.apply(lambda x: within_quantiles(x, min_seconds, max_seconds), axis=1)]
+	if "Reliance category" not in d.columns:
+		d["Reliance category"] = d.apply(label_reliance, axis=1)
+	d["Seconds"] = pd.to_numeric(d[time_col], errors="coerce") + 1
+	d = d.dropna(subset=["Seconds"])
+
+	# Gather per-scenario
+	scenarios = sorted(d["Scenario"].unique())
+	data = [d[d["Scenario"] == sc]["Seconds"].values for sc in scenarios]
+
+	# Compute stats for annotation
+	stats = {}
+	for sc, vals in zip(scenarios, data):
+		q1, med, q3 = np.percentile(vals, [25, 50, 75])
+		mean = np.mean(vals)
+		stats[sc] = {"q1": q1, "med": med, "q3": q3, "mean": mean}
+
+	# Set up colormap (light pastel)
+	cmap = plt.get_cmap(cmap_name, len(scenarios))
+	colors = [cmap(i) for i in range(len(scenarios))]
+
+	# Plot
+	fig, ax = plt.subplots(figsize=(8, 4))
+	bp = ax.boxplot(
+		data,
+		labels=scenarios, #[sc.replace("Scenario", "S") for sc in scenarios],
+		showmeans=True,
+		patch_artist=True,
+		boxprops=dict(linewidth=1.5),
+		whiskerprops=dict(color='gray', linewidth=1),
+		capprops=dict(color='gray', linewidth=1),
+		medianprops=dict(color='black', linewidth=2),
+		meanprops=dict(marker='D', markeredgecolor='black', markerfacecolor='white'),
+		flierprops=dict(marker='o', markerfacecolor='none', markeredgecolor='gray', markersize=5, alpha=0.6)
+	)
+
+	# Color each box with pastel
+	for patch, color in zip(bp['boxes'], colors):
+		patch.set_facecolor(color)
+		patch.set_alpha(0.8)
+
+	# Axes labels and title styling
+	# ax.set_title('Effort Distribution by Scenario', fontsize=16, fontweight='bold')
+	ax.set_xlabel('')
+	ax.set_ylabel('Seconds', fontsize=14)
+	ax.tick_params(axis='x', labelrotation=0, labelsize=10)
+	ax.tick_params(axis='y', labelsize=10)
+	# ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+	ax.grid(axis='y', linestyle='--', alpha=0.5)
+
+	# Annotate stats with white background boxes
+	ymin, ymax = ax.get_ylim()
+	span = ymax - ymin
+	offsets = {'q1': span * 0.02, 'med': span * 0.02, 'q3': span * 0.02, 'mean': span * 0.02}
+	for i, sc in enumerate(scenarios, start=1):
+		s = stats[sc]
+		for key, style in zip(['mean','med'], ['Mean','Median']):
+			y_val = s[key] + offsets[key]
+			ax.text(
+				i,
+				y_val,
+				f"{style}={s[key]:.2f}",
+				ha='center', va='bottom', fontsize=8,
+				color='black',
+				bbox=dict(facecolor='white', alpha=0.8, pad=1, edgecolor='none')
+			)
+
+	plt.tight_layout()
+
+	# Save and show
+	out_path = os.path.join(out_dir, f"time_distribution-s={min_seconds}_{max_seconds}.pdf")
+	plt.savefig(out_path)
+	if SHOW_ALL_FIGURES: plt.show()
+	print(f"Saved time distribution plot to {out_path}")
 
 def visualize_distribution(df, out_dir, min_seconds=None, max_seconds=None, keep_only_who_changed_decision=False, do_balance_treatments=False, keep_only_who_easily_understood_explanation=False, keep_only_measurable_effects=False):
 	# 0) Filter and copy
@@ -1614,14 +1702,15 @@ def main():
 	# 	# args.min_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.01).clip(upper=30).astype(int).to_dict()
 	# 	# print("Min seconds (1st percentile) per scenario:\n", args.min_seconds)
 
-	# if args.max_seconds is None:
-	# 	args.max_seconds = 360 # 6 minutes
+	if args.max_seconds is None:
+		args.max_seconds = 480 # 8 minutes
 	# 	# args.max_seconds = raw_df.groupby("Scenario")["Seconds"].quantile(0.99).clip(lower=360).astype(int).to_dict()
 	# 	# print("Max seconds (99th percentile) per scenario:\n", args.max_seconds)
 
 	plot_gender_distribution(raw_df, args.output)
 	visualize_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
 	plot_effort_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
+	plot_time_distribution(raw_df, args.output, args.min_seconds, args.max_seconds)
 	plot_reliance_vs_trust_attitude_effort(raw_df, args.output, args.min_seconds, args.max_seconds)
 	# plot_reliance_vs_trust_attitude_effort_by_scenario(raw_df, args.output, args.min_seconds, args.max_seconds)
 	# plot_effort_reliance_by_scenario(raw_df, args.output, args.min_seconds, args.max_seconds)

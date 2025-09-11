@@ -1,6 +1,7 @@
 # MAC-only files
 .DS_Store
 
+*.docx
 *.pkl
 *.zip
 *.csv
